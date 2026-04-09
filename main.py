@@ -7,6 +7,7 @@ KiwoomCore, OpenAPI 통신, 데이터 파이프라인, 전략 매니저 및 GUI(
 
 import sys
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import QApplication
 from core.kiwoom_core import KiwoomCore
@@ -104,7 +105,10 @@ def main():
             # 1. 오픈 포지션 손익 관리 (-2% 손절, +4% 익절)
             execution_manager.monitor_positions(pipeline)
             
-            # 2. 신규 진입 매수 시그널 탐색
+            # 2. ⏰ 미체결 주문 타임아웃 감시 (60초 초과 시 자동 취소 + Slack 경고)
+            execution_manager.monitor_pending_orders()
+            
+            # 3. 신규 진입 매수 시그널 탐색
             for code in codes:
                 df_1m, df_5m = pipeline.get_data(code)
                 is_buy_signal = strategy.analyze(code, df_1m, df_5m)
@@ -115,6 +119,54 @@ def main():
         timer = QTimer()
         timer.timeout.connect(evaluate_strategy_and_positions)
         timer.start(10000) # 10초마다 실행
+
+
+        # 13. 슬랙 푸시 알림: 시작, 종료 및 헬스체크 설정
+        # (1) 시작 알림
+        slack.send_message("🚀 *알림*: `Dopaming-Stock-Bot` 시스템 구동이 시작되었습니다. (정상 작동 중)")
+
+        # (2) 앱 종료 알림 (동기 통신)
+        def on_app_quit():
+            msg = "🛑 *알림*: `Dopaming-Stock-Bot` 시스템이 종료되었습니다."
+            logger.info(msg)
+            slack.send_message_sync(msg)
+        app.aboutToQuit.connect(on_app_quit)
+
+        # (3) 1분 헬스체크 (통신 장애 확인 및 시간별 스케줄 알림)
+        notification_flags = {"market_open": False, "market_close": False}
+        
+        def health_check():
+            # [A] 서버 접속 상태 체크
+            state = kiwoom.get_connect_state()
+            if state == 0:
+                error_msg = "🚨 *[헬스체크 경고]* 키움 API 서버와 통신이 끊어졌습니다. (재연결 확인 필요)"
+                logger.error(error_msg)
+                slack.send_message(error_msg)
+                
+            # [B] 지정 시간(장시작/종료) 슬랙 알림
+            now_str = datetime.now().strftime("%H:%M")
+            if now_str == "09:00" and not notification_flags["market_open"]:
+                open_msg = "🌅 *[장 시작 알림]* 09:00 정규장 매매를 시작합니다. 오늘도 성투하세요!"
+                logger.info(open_msg)
+                slack.send_message(open_msg)
+                notification_flags["market_open"] = True
+                
+            elif now_str == "15:30" and not notification_flags["market_close"]:
+                close_msg = "🌇 *[장 종료 알림]* 15:30 정규장이 마감되었습니다. 수고하셨습니다!"
+                logger.info(close_msg)
+                slack.send_message(close_msg)
+                notification_flags["market_close"] = True
+                
+            # 자정(00:00)에 다음날을 위해 플래그 초기화
+            elif now_str == "00:00":
+                notification_flags["market_open"] = False
+                notification_flags["market_close"] = False
+                
+        health_timer = QTimer()
+        health_timer.timeout.connect(health_check)
+        health_timer.start(60000) # 1분(60,000ms)마다 실행
+        # 가비지 컬렉션 방지 유지
+        kiwoom._health_timer = health_timer
 
     except Exception as e:
         logger.error(f"시스템 실행 중 예외 발생: {e}", exc_info=True)

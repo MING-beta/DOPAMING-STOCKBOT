@@ -27,3 +27,13 @@ class SlackNotifier:
                 
         # 메인 스레드 블로킹 방지를 위해 백그라운드로 보냄
         threading.Thread(target=_send, daemon=True).start()
+
+    def send_message_sync(self, message: str):
+        """Slack Webhook을 통해 동기식으로 메시지를 전송합니다 (프로그램 종료 직전용)."""
+        if not self.webhook_url or "YOUR/WEBHOOK/URL" in self.webhook_url:
+            return
+        try:
+            payload = {"text": message}
+            requests.post(self.webhook_url, json=payload, timeout=5)
+        except Exception as e:
+            self.logger.error(f"Slack 통지 발송 중 에러 발생: {e}")

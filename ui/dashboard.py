@@ -333,7 +333,15 @@ class Dashboard(QMainWindow):
         self.lbl_indicators.setText(f"📊 보조지표 설정: RSI({rsi_p}) | 볼린저밴드(20, 2.0)")
 
         # [3] 감시 종목 테이블 (Kiwoom 엔진의 monitored_codes 기준)
-        monitored_codes = sorted(list(self.kiwoom.monitored_codes))
+        # 정렬 우선순위: 1순위(진입대기 상태), 2순위(최근 발견된 기회순), 3순위(종목코드 순)
+        monitored_codes = sorted(
+            list(self.kiwoom.monitored_codes.keys()),
+            key=lambda c: (
+                0 if self.strategy.macro_states.get(c, False) else 1,    # 진입대기(0)가 관망(1)보다 우선
+                -self.kiwoom.monitored_codes.get(c, 0),                 # 최신 발견 종목 우선
+                c                                                       # 보조 정렬 (코드순)
+            )
+        )
         self.watch_table.setRowCount(len(monitored_codes))
         
         for row, code in enumerate(monitored_codes):

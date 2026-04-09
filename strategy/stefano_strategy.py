@@ -54,9 +54,13 @@ class StefanoStrategy:
 
         # 2. 5분봉(거시적) 다이버전스 감지
         macro_div = self._check_bullish_divergence(df_5m, window=self.check_window)
-        if macro_div:
+        if macro_div and not self.macro_states.get(code, False):
             self.macro_states[code] = True
             self.logger.info(f"[{code}] 5분봉 상승 다이버전스 감지! 진입 State 활성화.")
+        elif not macro_div:
+             # 다이버전스 상태가 해제되었을 때만 False로 변경 (필요 시)
+             # 단, 진입대기 상태를 유지하고 싶다면 로직에 따라 조절 가능
+             pass
 
         # 3. 1분봉(미시적) 이중 다이버전스 및 BB 하단 필터 확인
         if self.macro_states.get(code, False):

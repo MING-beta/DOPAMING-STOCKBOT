@@ -38,6 +38,8 @@ class KiwoomCore(QAxWidget):
         self.available_cash = 0
         self._condition_loaded = False
         self.login_event_loop = None
+        # 현재 실시간 감시 중인 종목코드 집합 (동적 편입/이탈 추적용)
+        self.monitored_codes = set()
         
         # Kiwoom OpenAPI+ 제어기 (COM 오브젝트) 생성
         success = self.setControl("KHOPENAPI.KHOpenAPICtrl.1")
@@ -69,6 +71,7 @@ class KiwoomCore(QAxWidget):
         self.OnEventConnect.connect(self._on_event_connect)
         self.OnReceiveConditionVer.connect(self.event_handler.on_receive_condition_ver)
         self.OnReceiveTrCondition.connect(self.event_handler.on_receive_tr_condition)
+        self.OnReceiveRealCondition.connect(self.event_handler.on_receive_real_condition)  # 실시간 편입/이탈
         self.OnReceiveRealData.connect(self.event_handler.on_receive_real_data)
         self.OnReceiveChejanData.connect(self.event_handler.on_receive_chejan_data)
         self.OnReceiveTrData.connect(self.event_handler.on_receive_tr_data)
@@ -119,6 +122,12 @@ class KiwoomCore(QAxWidget):
         acc_list = self.dynamicCall("GetLoginInfo(QString)", "ACCNO")
         return acc_list.rstrip(';').split(';')
 
+    def get_connect_state(self):
+        """현재 서버와 접속 상태를 반환합니다. (0: 미연결, 1: 연결됨)"""
+        if getattr(self, 'is_mock', False):
+            return 1
+        return self.dynamicCall("GetConnectState()")
+
     def request_account_info(self, password):
         """계좌 예수금/잔고 동기화를 Throttler를 통해 지시합니다."""
         acc_list = self.get_account_list()
@@ -163,3 +172,8 @@ class KiwoomCore(QAxWidget):
         code_str = ";".join(code_list) if isinstance(code_list, list) else code_list
         self.logger.info(f"SetRealReg 요청: Codes={code_str}")
         self.dynamicCall("SetRealReg(QString, QString, QString, QString)", screen_no, code_str, fid_list, opt_type)
+
+    def set_real_remove(self, screen_no, code):
+        """실시간(Real) 수신 등록 해제 (조건 이탈 종목)"""
+        self.logger.info(f"SetRealRemove 요청: {code}")
+        self.dynamicCall("SetRealRemove(QString, QString)", screen_no, code)

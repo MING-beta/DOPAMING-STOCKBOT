@@ -46,6 +46,9 @@ class KiwoomCore(QAxWidget):
         # Kiwoom OpenAPI+ 제어기 (COM 오브젝트) 생성
         success = self.setControl("KHOPENAPI.KHOpenAPICtrl.1")
         
+        # [Win32 핸들 확보] 화면이 뜨기 전 강제로 OS 핸들을 할당받아 '핸들값 없음' 오류 방지
+        _ = self.winId()
+        
         # 64비트 문제나 API 미설치 시 예외(Mock) 렌더링
         if not success:
             self.logger.error("🔥 키움증권 OpenAPI+ 활성화 실패! (64비트 파이썬이거나 설치되지 않음)")

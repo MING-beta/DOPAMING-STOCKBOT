@@ -42,10 +42,7 @@ def main():
         # 3. KiwoomCore 싱글톤 인스턴스 가져오기
         kiwoom = KiwoomCore.get_instance()
         
-        # 4. 로그인 요청 및 대기 (CommConnect > OnEventConnect 이벤트루프 활용)
-        kiwoom.comm_connect()
-        
-        # 5. 데이터 파이프라인 생성 및 시작, Kiwoom 코어에 연결
+        # 4. 데이터 파이프라인 생성 및 시작, Kiwoom 코어에 연결
         pipeline = DataPipeline()
         pipeline.start_pipeline()
         kiwoom.set_data_pipeline(pipeline)
@@ -79,8 +76,12 @@ def main():
         gui_handler = add_gui_logger("DopamingBot")
         gui_handler.signal.new_log.connect(dashboard.append_log)
         
-        # 10. 대시보드 화면 표출
+        # 10. 대시보드 화면 표출 (가시화 및 핸들 확보)
         dashboard.show()
+        
+        # 11. 로그인 요청 및 대기 (Dashboard 가시화 후 실행하여 핸들 오류 방지)
+        logger.info("🔑 키움 OpenAPI+ 로그인 요청...")
+        kiwoom.comm_connect()
         
         # 11. 계좌 동기화 통신 시작 (동기화 완료 응답 시 자동으로 get_condition_load 호출 연계됨)
         logger.info("내 계좌 예수금 및 잔고 동기화 절차 시작...")

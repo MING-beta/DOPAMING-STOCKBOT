@@ -54,13 +54,28 @@ class StefanoStrategy:
 
         # 2. 5분봉(거시적) 다이버전스 감지
         macro_div = self._check_bullish_divergence(df_5m, window=self.check_window)
-        if macro_div and not self.macro_states.get(code, False):
-            self.macro_states[code] = True
-            self.logger.info(f"[{code}] 5분봉 상승 다이버전스 감지! 진입 State 활성화.")
-        elif not macro_div:
-             # 다이버전스 상태가 해제되었을 때만 False로 변경 (필요 시)
-             # 단, 진입대기 상태를 유지하고 싶다면 로직에 따라 조절 가능
-             pass
+        current_time = df_5m.index[-1]
+
+        # [최적화] 거시 신호가 감지되면 진입 대기 상태로 전환
+        if macro_div:
+            if not self.macro_states.get(code, False):
+                self.macro_states[code] = True
+                self._indicator_cache[f"{code}_macro_time"] = current_time
+                self.logger.info(f"[{code}] 5분봉 상승 다이버전스 감지! 진입 State 활성화.")
+        else:
+            # [전체 검수 보강] 매수 대기 상태(macro_states) 자동 만료(Reset) 로직
+            if self.macro_states.get(code, False):
+                entry_time = self._indicator_cache.get(f"{code}_macro_time")
+                
+                # A. 시간 만료: 5분봉 기준 6봉(30분)이 지났는데도 1분봉 타점이 안오면 신호 소멸로 간주
+                # B. 추세 회복: 5분봉 RSI가 50(균형점)을 넘어서면 이미 반등이 끝난 것으로 보고 리셋
+                rsi_5m = df_5m['RSI'].iloc[-1]
+                time_diff = (current_time - entry_time).total_seconds() / 60 if entry_time else 0
+                
+                if time_diff > 30 or rsi_5m > 50:
+                    self.macro_states[code] = False
+                    reason = "시간 경과(30분)" if time_diff > 30 else "추세 회복(RSI > 50)"
+                    self.logger.info(f"[{code}] 거시 신호가 유효하지 않아 {reason}로 대기 상태를 해제(Reset)합니다.")
 
         # 3. 1분봉(미시적) 이중 다이버전스 및 BB 하단 필터 확인
         if self.macro_states.get(code, False):
@@ -70,7 +85,7 @@ class StefanoStrategy:
                 bb_lower = df_1m['BB_Lower'].iloc[-1]
                 
                 if last_price <= bb_lower * 1.005:
-                    self.logger.warning(f"[{code}] 💥 이중 다이버전스 + BB 하단 통과! 매수 시그널!")
+                    self.logger.warning(f"[{code}] 💥 이분봉 이중 다이버전스 + BB 하단 통과! 매수 실행!")
                     self.macro_states[code] = False
                     return True
         return False

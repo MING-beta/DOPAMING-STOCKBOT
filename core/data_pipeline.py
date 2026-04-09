@@ -172,3 +172,20 @@ class DataPipeline:
             }).dropna()
             
         self.logger.info(f"[{code}] 과거 차트 데이터 적재 완료: 1분봉 {len(self.data_1m[code])}개")
+
+    def remove_code(self, code):
+        """
+        조건검색 이탈 종목을 파이프라인 메모리에서 완전히 제거합니다.
+        더 이상 실시간 틱을 받지 않으므로 메모리 낭비를 방지합니다.
+        """
+        with self.lock:
+            removed = False
+            if code in self.data_1m:
+                del self.data_1m[code]
+                removed = True
+            if code in self.data_5m:
+                del self.data_5m[code]
+                removed = True
+        if removed:
+            self.logger.info(f"[{code}] 조건 이탈 → 파이프라인 데이터 제거 완료")
+

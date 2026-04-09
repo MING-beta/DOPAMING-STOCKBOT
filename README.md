@@ -78,10 +78,11 @@ pip install -r requirements.txt
 | `TRADE_STOP_LOSS` | 종목별 최대 손절선 (예: -2.0%) | `-0.02` |
 | `TRAILING_STOP_ACTIVATION`| 트레일링 스톱이 작동하기 시작하는 수익률 | `0.02` |
 | `TRAILING_STOP_CALLBACK`| 최고점 대비 몇 % 하락 시 매도할 것인가 | `0.01` |
-| `ORDER_PENDING_TIMEOUT`| 미체결 주문이 유지되는 최대 시간(초) | `60` |
-| `TELEGRAM_TOKEN` | 텔레그램 봇 토큰 (알림용) | `123456:ABC...` |
-| `TELEGRAM_CHAT_ID` | 알림을 받을 텔레그램 채팅 ID | `987654321` |
+| `ACCOUNT_PASSWORD` | 키움증권 계좌 비밀번호 (모의투자 시 `0000`) | `0000` |
 | `MAX_MONITORED_STOCKS` | **[신규]** 최대 실시간 감시 종목 수 | `20` (권장: 20~30) |
+| `INDICATOR_RSI_PERIOD` | RSI 지표 계산 기간 (캔들 개수) | `14` |
+| `INDICATOR_BB_PERIOD` | 볼린저밴드 이동평균 기간 | `20` |
+| `INDICATOR_BB_STD` | 볼린저밴드 표준편차 배수 | `2.0` |
 
 ---
 

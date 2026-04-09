@@ -72,6 +72,10 @@ class EventHandler:
             
             # 1. 감시 한도 도달 시 다이내믹 교체 시도
             if len(self.kc.monitored_codes) >= max_monitored:
+                # ExecutionManager가 아직 초기화되지 않았다면 교체 보류
+                if not self.kc.execution_manager:
+                    return
+
                 # 보유 포지션이 없는 종목들 중 가장 오래된 종목 찾기 (교체 후보)
                 with self.kc.execution_manager.lock:
                     active_positions = list(self.kc.execution_manager.positions.keys())

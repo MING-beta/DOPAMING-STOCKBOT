@@ -48,16 +48,45 @@ Dopaming-Stock-Bot/
 
 ---
 
-## 🚀 빠른 시작 가이드 (Quick Start)
+## 🚀 설치 및 가동 가이드 (Installation & Setup)
 
-### 1단계: 환경 설정 (`.env`)
-`.env.template`을 복사하여 `.env`를 생성하고 다음 항목을 입력하세요.
-- `SLACK_WEBHOOK_URL`: 리포트 수신용 슬랙 웹훅 URL
-- `DRY_RUN_MODE`: `False` (실전 매매), `True` (가상 체결 테스트)
+### 1단계: 필수 환경 준비
+- **Python 32-bit 설치**: 키움 API는 32비트 환경에서만 작동합니다. [Python 3.10.x 32-bit](https://www.python.org/downloads/windows/) 버전을 설치하십시오.
+- **키움 OpenAPI+ 설치**: 키움증권 홈페이지에서 OpenAPI+ 모듈을 다운로드하여 설치 및 로그인 설정을 완료하십시오.
 
-### 2단계: 최적 실행
-📌 **`start_bot.bat` 실행** (자동 관리자 권한 및 UTF-8 최적화)
-- 실거래 전 반드시 `test_trade.py`를 실행하여 13가지 핵심 매매 알고리즘의 작동 여부를 검증하십시오.
+### 2단계: 저장소 클론 및 가상환경 구축
+```bash
+# 저장소 클론
+git clone https://github.com/MING-beta/DOPAMING-STOCKBOT.git
+cd DOPAMING-STOCKBOT
+
+# 32비트 가상환경 생성 (32비트 파이썬 경로 지정 필요)
+python -m venv venv32
+source venv32/script/activate  # Windows: .\venv32\Scripts\activate
+
+# 의존성 패키지 설치
+pip install -r requirements.txt
+```
+
+### 3단계: 환경 변수 설정 (`.env`)
+`.env.template` 파일을 복사하여 `.env` 파일을 생성하고 다음의 핵심 설정값을 입력합니다.
+
+| 설정 항목 | 설명 | 기본값 |
+| :--- | :--- | :--- |
+| `DRY_RUN_MODE` | 실전 매매 여부 (`True`: 가상 / `False`: 실전) | `True` |
+| `SLACK_WEBHOOK_URL` | 리포트 및 알림 수신용 슬랙 웹훅 주소 | - |
+| `TRADE_INVEST_RATE` | 종목당 투자 비중 (총 자산 대비 %) | `0.05` |
+| `RISK_LOSS_LIMIT_RATE` | 당일 최대 허용 손실 (충족 시 전량 청산) | `0.20` |
+| `TRADE_STOP_LOSS` | 종목별 손절선 (예: -2.0%) | `-0.02` |
+| `TRADE_TARGET_PROFIT`| 종목별 목표 익절선 (예: +4.0%) | `0.04` |
+
+### 4단계: 시스템 가동
+가장 안정적인 실행을 위해 **`start_bot.bat`** 파일을 활용하십시오.
+1. `start_bot.bat` 마우스 우클릭 -> **[관리자 권한으로 실행]**
+2. 배치 파일은 다음 작업을 자동으로 수행합니다:
+   - 관리자 권한 강제 획득 (API 업데이트 오류 방지)
+   - UTF-8 인코딩 최적화 (한글 깨짐 방지)
+   - 백그라운드 프로세스(`pythonw`) 실행
 
 ---
 

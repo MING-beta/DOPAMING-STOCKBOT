@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 from datetime import datetime
 
@@ -39,6 +40,12 @@ class EventHandler:
         if code_list == ['']: code_list = []
         self.logger.info(f"검색된 종목 수: {len(code_list)}건 -> {code_list}")
         
+        # 감시 종목 상한제 적용
+        max_monitored = int(os.getenv("MAX_MONITORED_STOCKS", "20"))
+        if len(code_list) > max_monitored:
+            self.logger.warning(f"⚠️ 검색 결과({len(code_list)}건)가 상한선({max_monitored}개)을 초과하여 상위 {max_monitored}개만 감시합니다.")
+            code_list = code_list[:max_monitored]
+            
         # 감시 종목 집합 초기화 및 등록
         self.kc.monitored_codes = set(code_list)
         
@@ -55,6 +62,11 @@ class EventHandler:
         - strType == 'D': 조건 이탈 → 감시 목록 제거 및 실시간 해제
         """
         if strType == 'I':  # 편입
+            max_monitored = int(os.getenv("MAX_MONITORED_STOCKS", "20"))
+            if len(self.kc.monitored_codes) >= max_monitored:
+                self.logger.warning(f"🚫 [감시 한도 초과] {strCode} 편입 무시 (현재 {len(self.kc.monitored_codes)}/{max_monitored}개 감시 중)")
+                return
+
             if strCode not in self.kc.monitored_codes:
                 self.kc.monitored_codes.add(strCode)
                 self.logger.info(f"[실시간 조건 편입] {strCode} ← {strConditionName} | 총 감시 종목: {len(self.kc.monitored_codes)}개")

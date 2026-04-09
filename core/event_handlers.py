@@ -33,17 +33,49 @@ class EventHandler:
             self.logger.error(f"조건검색식 로드 실패 ({sMsg})")
 
     def on_receive_tr_condition(self, sScrNo, strCodeList, strConditionName, nIndex, nNext):
-        """조건검색 등록 후 일치하는 종목이 발생했을 때의 처리"""
+        """조건검색 등록 후 현재 조건에 맞는 종목 초기 목록 수신 처리"""
         self.logger.info(f"[{strConditionName}] 검색 결과 수신")
         code_list = strCodeList.rstrip(';').split(';')
         if code_list == ['']: code_list = []
         self.logger.info(f"검색된 종목 수: {len(code_list)}건 -> {code_list}")
+        
+        # 감시 종목 집합 초기화 및 등록
+        self.kc.monitored_codes = set(code_list)
         
         # 검색된 종목들에 대해 실시간 틱 데이터 수신 등록 및 과거 데이터 프리페치
         if code_list:
             self.kc.set_real_reg("1000", code_list, "10;15;20", "0") # FID: 10(현재가), 15(거래량), 20(체결시간)
             for code in code_list:
                 self.kc.request_opt10080(code)
+
+    def on_receive_real_condition(self, strCode, strType, strConditionName, strConditionIndex):
+        """
+        실시간 조건검색 편입(I)/이탈(D) 이벤트 처리
+        - strType == 'I': 조건 편입 → 감시 목록 추가 및 실시간 등록
+        - strType == 'D': 조건 이탈 → 감시 목록 제거 및 실시간 해제
+        """
+        if strType == 'I':  # 편입
+            if strCode not in self.kc.monitored_codes:
+                self.kc.monitored_codes.add(strCode)
+                self.logger.info(f"[실시간 조건 편입] {strCode} ← {strConditionName} | 총 감시 종목: {len(self.kc.monitored_codes)}개")
+                # 실시간 틱 수신 추가 등록 ("1"은 기존 등록에 추가)
+                self.kc.set_real_reg("1000", [strCode], "10;15;20", "1")
+                # 해당 종목 과거 분봉 차트 프리페치
+                self.kc.request_opt10080(strCode)
+            else:
+                self.logger.debug(f"[실시간 조건 편입] {strCode} - 이미 감시 중, 무시")
+                
+        elif strType == 'D':  # 이탈
+            if strCode in self.kc.monitored_codes:
+                self.kc.monitored_codes.discard(strCode)
+                self.logger.info(f"[실시간 조건 이탈] {strCode} ← {strConditionName} | 총 감시 종목: {len(self.kc.monitored_codes)}개")
+                # 해당 종목 실시간 수신 해제
+                self.kc.set_real_remove("1000", strCode)
+                # 파이프라인에서도 해당 종목 데이터 제거
+                if self.kc.data_pipeline:
+                    self.kc.data_pipeline.remove_code(strCode)
+            else:
+                self.logger.debug(f"[실시간 조건 이탈] {strCode} - 감시 목록에 없음, 무시")
 
     def on_receive_real_data(self, sCode, sRealType, sRealData):
         """주식 체결(실시간) 틱 데이터 수신 처리"""

@@ -1,4 +1,5 @@
 import os
+import time
 import pandas as pd
 from datetime import datetime
 
@@ -40,14 +41,15 @@ class EventHandler:
         if code_list == ['']: code_list = []
         self.logger.info(f"검색된 종목 수: {len(code_list)}건 -> {code_list}")
         
-        # 감시 종목 상한제 적용
+        # 감시 종목 상한제 적용 및 진입 시간 기록
         max_monitored = int(os.getenv("MAX_MONITORED_STOCKS", "20"))
         if len(code_list) > max_monitored:
             self.logger.warning(f"⚠️ 검색 결과({len(code_list)}건)가 상한선({max_monitored}개)을 초과하여 상위 {max_monitored}개만 감시합니다.")
             code_list = code_list[:max_monitored]
             
-        # 감시 종목 집합 초기화 및 등록
-        self.kc.monitored_codes = set(code_list)
+        # 감시 종목 데이터 초기화 { 코드: 진입시간 }
+        now = time.time()
+        self.kc.monitored_codes = {code: now for code in code_list}
         
         # 검색된 종목들에 대해 실시간 틱 데이터 수신 등록 및 과거 데이터 프리페치
         if code_list:
@@ -62,25 +64,45 @@ class EventHandler:
         - strType == 'D': 조건 이탈 → 감시 목록 제거 및 실시간 해제
         """
         if strType == 'I':  # 편입
-            max_monitored = int(os.getenv("MAX_MONITORED_STOCKS", "20"))
-            if len(self.kc.monitored_codes) >= max_monitored:
-                self.logger.warning(f"🚫 [감시 한도 초과] {strCode} 편입 무시 (현재 {len(self.kc.monitored_codes)}/{max_monitored}개 감시 중)")
+            if strCode in self.kc.monitored_codes:
+                self.logger.debug(f"[실시간 조건 편입] {strCode} - 이미 감시 중, 무시")
                 return
 
-            if strCode not in self.kc.monitored_codes:
-                self.kc.monitored_codes.add(strCode)
-                self.logger.info(f"[실시간 조건 편입] {strCode} ← {strConditionName} | 총 감시 종목: {len(self.kc.monitored_codes)}개")
-                # 실시간 틱 수신 추가 등록 ("1"은 기존 등록에 추가)
-                self.kc.set_real_reg("1000", [strCode], "10;15;20", "1")
-                # 해당 종목 과거 분봉 차트 프리페치
-                self.kc.request_opt10080(strCode)
-            else:
-                self.logger.debug(f"[실시간 조건 편입] {strCode} - 이미 감시 중, 무시")
+            max_monitored = int(os.getenv("MAX_MONITORED_STOCKS", "20"))
+            
+            # 1. 감시 한도 도달 시 다이내믹 교체 시도
+            if len(self.kc.monitored_codes) >= max_monitored:
+                # 보유 포지션이 없는 종목들 중 가장 오래된 종목 찾기 (교체 후보)
+                with self.kc.execution_manager.lock:
+                    active_positions = list(self.kc.execution_manager.positions.keys())
                 
+                # 감시 중인 종목 중 보유 중이지 않은 후보군 추출
+                candidates = {code: t for code in self.kc.monitored_codes if code not in active_positions}
+                
+                if candidates:
+                    # 가장 오래된(타임스탬프가 가장 작은) 종목 선정
+                    oldest_code = min(candidates, key=candidates.get)
+                    self.logger.warning(f"🔄 [종목 교체] 한도 도달로 인해 유휴 종목 {oldest_code}를 신규 종목 {strCode}로 교체합니다.")
+                    
+                    # 기존 종목 제거
+                    del self.kc.monitored_codes[oldest_code]
+                    self.kc.set_real_remove("1000", oldest_code)
+                    if self.kc.data_pipeline:
+                        self.kc.data_pipeline.remove_code(oldest_code)
+                else:
+                    self.logger.error(f"🚫 [교체 실패] 현재 상한선({max_monitored})을 모두 보유 종목이 차지하고 있어 {strCode}를 편입할 수 없습니다.")
+                    return
+
+            # 2. 신규 종목 등록
+            self.kc.monitored_codes[strCode] = time.time()
+            self.logger.info(f"[실시간 조건 편입] {strCode} ← {strConditionName} | 감시 종목: {len(self.kc.monitored_codes)}/{max_monitored}")
+            self.kc.set_real_reg("1000", [strCode], "10;15;20", "1")
+            self.kc.request_opt10080(strCode)
+            
         elif strType == 'D':  # 이탈
             if strCode in self.kc.monitored_codes:
-                self.kc.monitored_codes.discard(strCode)
-                self.logger.info(f"[실시간 조건 이탈] {strCode} ← {strConditionName} | 총 감시 종목: {len(self.kc.monitored_codes)}개")
+                del self.kc.monitored_codes[strCode]
+                self.logger.info(f"[실시간 조건 이탈] {strCode} ← {strConditionName} | 감시 종목: {len(self.kc.monitored_codes)}개")
                 # 해당 종목 실시간 수신 해제
                 self.kc.set_real_remove("1000", strCode)
                 # 파이프라인에서도 해당 종목 데이터 제거

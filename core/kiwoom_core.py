@@ -38,8 +38,8 @@ class KiwoomCore(QAxWidget):
         self.available_cash = 0
         self._condition_loaded = False
         self.login_event_loop = None
-        # 현재 실시간 감시 중인 종목코드 집합 (동적 편입/이탈 추적용)
-        self.monitored_codes = set()
+        # 현재 실시간 감시 중인 종목 데이터: { 종목코드: 감시시작타임스탬프 }
+        self.monitored_codes = {}
         # 초기 총 자산 (리스크 가드 기준점)
         self.initial_total_assets = 0
         

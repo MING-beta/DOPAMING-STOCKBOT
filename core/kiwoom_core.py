@@ -40,6 +40,8 @@ class KiwoomCore(QAxWidget):
         self.login_event_loop = None
         # 현재 실시간 감시 중인 종목코드 집합 (동적 편입/이탈 추적용)
         self.monitored_codes = set()
+        # 초기 총 자산 (리스크 가드 기준점)
+        self.initial_total_assets = 0
         
         # Kiwoom OpenAPI+ 제어기 (COM 오브젝트) 생성
         success = self.setControl("KHOPENAPI.KHOpenAPICtrl.1")
@@ -84,7 +86,8 @@ class KiwoomCore(QAxWidget):
         self.get_condition_load = lambda: self.event_handler.on_receive_condition_ver(1, "")
         
         def mock_dynamicCall(func_name, *args):
-            if "GetCommData" in func_name and "주문가능금액" in args: return "10000000"
+            if "GetCommData" in func_name and "주문가능금액" in args: return "50000000"
+            if "GetCommData" in func_name and "추정평가자산" in args: return "50000000"
             if "GetRepeatCnt" in func_name: return 0
             if "GetConditionNameList" in func_name: return "000^가상시뮬레이션조건;"
             if "SendCondition" in func_name: return 1
@@ -99,6 +102,13 @@ class KiwoomCore(QAxWidget):
             return 0
             
         self.dynamicCall = mock_dynamicCall
+        self.reconnect = lambda: self._on_event_connect(0)
+
+    def get_master_last_price(self, code):
+        """특정 종목의 전일 종가(기준가)를 반환합니다."""
+        if getattr(self, 'is_mock', False): return 10000
+        res = self.dynamicCall("GetMasterLastPrice(QString)", code)
+        return float(res) if res else 0
 
     def comm_connect(self):
         """서버 로그인 요청 (비동기 처리 대기)"""
@@ -107,6 +117,15 @@ class KiwoomCore(QAxWidget):
         self.login_event_loop = QEventLoop()
         self.login_event_loop.exec_()
         self.logger.debug("CommConnect 로그인 이벤트 루프 종료")
+
+    def reconnect(self):
+        """서버와의 통신 재연결을 시도합니다."""
+        self.logger.warning("🔄 [재연결] 서버와의 재연결을 시도합니다...")
+        # 기존 로직 및 상태 초기화 (필요시)
+        self._condition_loaded = False
+        self.monitored_codes = set()
+        # 재로그인 시도
+        self.comm_connect()
 
     def _on_event_connect(self, err_code):
         """로그인 콜백"""
@@ -140,9 +159,14 @@ class KiwoomCore(QAxWidget):
         self.logger.debug(f"[스로틀링 큐 적재] 계좌 동기화 요청 (acc={acc_no})")
 
     def request_opt10080(self, code):
-        """1분봉 차트 조회를 Throttler를 통해 지시합니다."""
+        """1분봉 차트 조회를 Throttler를 통해 지시하며, 기준가(전일종가)를 동기화합니다."""
+        # 전일 종가 동기화 (대시보드 등락률용 정밀 보정)
+        prev_close = self.get_master_last_price(code)
+        if self.data_pipeline:
+            self.data_pipeline.reference_prices[code] = prev_close
+            
         self.throttler.put({"type": "opt10080", "code": code})
-        self.logger.debug(f"[스로틀링 큐 적재] 과거 차트(opt10080) 요청: {code}")
+        self.logger.debug(f"[스로틀링 큐 적재] 과거 차트(opt10080) 및 기준가({prev_close}) 요청: {code}")
 
     def send_order(self, rqname, screen_no, order_type, code, qty, price, hoga_gb, org_order_no):
         """메인 주문 전송"""

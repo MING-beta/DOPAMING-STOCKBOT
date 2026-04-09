@@ -1,325 +1,491 @@
 import sys
+import os
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QTextEdit, QTableWidget, QTableWidgetItem, QLabel, QHeaderView
+    QTextEdit, QTableWidget, QTableWidgetItem, QLabel, QHeaderView,
+    QGroupBox, QGridLayout, QFrame
 )
-from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtCore import QTimer, Qt, QSize
+from PyQt5.QtGui import QColor, QFont, QPalette, QBrush
 
 """
-Dashboard 모듈
-----------------
-PyQt 앱의 메인 화면 디자인과 데이터 시각화를 전담합니다.
-데이터 파이프라인에서 최신 상태를 폴링(Polling)하여 UI 테이블 등에 표시하며,
-주소/키워드 색상 등에 Toss/Kakao 벤치마킹 디자인이 적용되어 있습니다.
+Dashboard 2.0 Premium Edition
+-------------------------------
+Toss/Kakao 금융앱을 벤치마킹한 차분하고 고급스러운 하이엔드 거래 위주 레이아웃입니다.
+핵심 지표의 가시성을 극대화하고, 데이터 계층화를 통해 피로도를 줄였습니다.
 """
 
 class Dashboard(QMainWindow):
-    """실시간 로깅, 종목 감시 현황, 그리고 자산 데이터를 렌더링하는 GUI 위젯"""
     def __init__(self, kiwoom, pipeline, execution_manager, strategy):
-        """
-        초기화 메서드. 핵심 DI 객체들을 내부 참조로 연결하고 화면 UI를 세팅합니다.
-        
-        Args:
-            kiwoom: Kiwoom API 코어
-            pipeline: DataPipeline (데이터 엑세스 용도)
-            execution_manager: ExecutionManager (포지션 엑세스 용도)
-            strategy: StefanoStrategy (알고리즘 상태 엑세스 용도)
-        """
         super().__init__()
         self.kiwoom = kiwoom
         self.pipeline = pipeline
         self.execution_manager = execution_manager
         self.strategy = strategy
-        self.code_names = {} # 종목명 캐시 (API 부하 방지용)
+        self.code_names = {} 
         
         self.init_ui()
         self.apply_dark_theme()
         
-        # 1초마다 백그라운드 상태를 가져와 UI 업데이트해주는 GUI 폴링 타이머
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_dashboard)
         self.update_timer.start(1000)
 
     def init_ui(self):
-        self.setWindowTitle("Dopaming Stock Bot - Live Dashboard")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setWindowTitle("DOPAMING STOCK BOT v2.0 - Premium Edition")
+        self.setMinimumSize(1280, 900)
 
-        # 메인 위젯 및 분할 레이아웃
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        main_layout = QHBoxLayout(main_widget)
+        # 메인 컨테이너
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        outer_layout = QVBoxLayout(central_widget)
+        outer_layout.setContentsMargins(20, 20, 20, 20)
+        outer_layout.setSpacing(16)
 
-        # 좌측 레이아웃 (로그 텍스트 에어리어)
-        left_layout = QVBoxLayout()
-        # 로그 라벨
-        log_label = QLabel("시스템 실시간 로그")
-        log_label.setFont(QFont("Apple SD Gothic Neo", 12, QFont.Bold))
+        # ─────────── [1] 상단: 메인 콘텐츠 영역 (중앙 & 사이드) ───────────
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(20)
+
+        # [1-1] 좌측/중앙: 매매 메인 스택 (종목 리스트 & 포지션)
+        main_stack = QVBoxLayout()
+        main_stack.setSpacing(16)
+
+        # (A) 감시 종목 센터
+        watch_card = QFrame()
+        watch_card.setObjectName("Card")
+        watch_vbox = QVBoxLayout(watch_card)
+        
+        watch_header = QHBoxLayout()
+        watch_title = QLabel("🔍 실시간 종목 감시")
+        watch_title.setFont(QFont("Apple SD Gothic Neo", 14, QFont.Bold))
+        watch_header.addWidget(watch_title)
+        watch_vbox.addLayout(watch_header)
+
+        self.watch_table = QTableWidget(0, 7)
+        self.watch_table.setHorizontalHeaderLabels([
+            "종목명", "현재가 (등락)", "RSI 신호", "수급(억)", "BB 위치", "당일 위치", "전략 상태"
+        ])
+        self.watch_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.watch_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.watch_table.verticalHeader().setVisible(False)
+        self.watch_table.setShowGrid(False)
+        watch_vbox.addWidget(self.watch_table)
+        
+        main_stack.addWidget(watch_card, stretch=3)
+
+        # (B) 오픈 포지션 센터
+        pos_card = QFrame()
+        pos_card.setObjectName("Card")
+        pos_vbox = QVBoxLayout(pos_card)
+        
+        pos_title = QLabel("📦 보유 종목 현황")
+        pos_title.setFont(QFont("Apple SD Gothic Neo", 14, QFont.Bold))
+        pos_vbox.addWidget(pos_title)
+
+        self.pos_table = QTableWidget(0, 9)
+        self.pos_table.setHorizontalHeaderLabels([
+            "종목명", "매입가", "수익률", "평가손익", "매입금액", 
+            "현재가", "보유수량", "등락률", "보유비중"
+        ])
+        self.pos_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.pos_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.pos_table.verticalHeader().setVisible(False)
+        self.pos_table.setShowGrid(False)
+        pos_vbox.addWidget(self.pos_table)
+        
+        main_stack.addWidget(pos_card, stretch=2)
+
+        content_layout.addLayout(main_stack, stretch=7)
+
+        # [1-2] 우측: 요약 & 설정 패널 (Portfolio Summary)
+        side_panel = QVBoxLayout()
+        side_panel.setSpacing(16)
+
+        # (C) 자산 통합 관리 카드 (Portfolio Summary)
+        summary_card = QFrame()
+        summary_card.setObjectName("SummaryCard")
+        summary_vbox = QVBoxLayout(summary_card)
+        summary_vbox.setContentsMargins(24, 24, 24, 24)
+        
+        sum_title = QLabel("자산 운용 현황")
+        sum_title.setStyleSheet("color: #ADB5BD; font-size: 11px; font-weight: bold; text-transform: uppercase;")
+        
+        self.cash_value_label = QLabel("로딩 중...")
+        self.cash_value_label.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF;")
+        
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("background-color: rgba(255, 255, 255, 0.1); border: none; height: 1px;")
+
+        self.daily_pnl_label = QLabel("당일 손익: 0원")
+        self.daily_pnl_label.setFont(QFont("Apple SD Gothic Neo", 15, QFont.Bold))
+        
+        self.risk_limit_label = QLabel("리스크 한도: -")
+        self.risk_limit_label.setStyleSheet("color: #FFA500; font-size: 11px;")
+        
+        summary_vbox.addWidget(sum_title)
+        summary_vbox.addWidget(self.cash_value_label)
+        summary_vbox.addSpacing(8)
+        summary_vbox.addWidget(line)
+        summary_vbox.addSpacing(16)
+        summary_vbox.addWidget(self.daily_pnl_label)
+        summary_vbox.addWidget(self.risk_limit_label)
+        summary_vbox.addStretch()
+        
+        side_panel.addWidget(summary_card, stretch=2)
+
+        # (D) 운영 설정 정보 카드
+        config_card = QFrame()
+        config_card.setObjectName("Card")
+        config_vbox = QVBoxLayout(config_card)
+        
+        config_title = QLabel("⚙️ 운영 설정 센터")
+        config_title.setFont(QFont("Apple SD Gothic Neo", 12, QFont.Bold))
+        config_vbox.addWidget(config_title)
+        
+        config_grid = QGridLayout()
+        self.lbl_trade_mode = QLabel("매매 모드: -")
+        self.lbl_risk_rate = QLabel("투자 비중: -")
+        self.lbl_profit_target = QLabel("목표 수익/손절: -")
+        self.lbl_trailing = QLabel("트레일링 스톱: -")
+        self.lbl_indicators = QLabel("보조지표 설정: -")
+        
+        for i, lbl in enumerate([self.lbl_trade_mode, self.lbl_risk_rate, self.lbl_profit_target, self.lbl_trailing, self.lbl_indicators]):
+            lbl.setStyleSheet("color: #ADB5BD; font-size: 11px;")
+            config_grid.addWidget(lbl, i // 1, i % 1) 
+            # 한 줄씩 정렬로 변경하여 가독성 증대
+            
+        config_vbox.addLayout(config_grid)
+        config_vbox.addStretch()
+        side_panel.addWidget(config_card, stretch=3)
+
+        content_layout.addLayout(side_panel, stretch=3)
+        outer_layout.addLayout(content_layout, stretch=8)
+
+        # ─────────── [2] 하단: 시스템 콘솔 (Log) ───────────
+        log_card = QFrame()
+        log_card.setObjectName("Console")
+        log_vbox = QVBoxLayout(log_card)
+        log_vbox.setContentsMargins(12, 12, 12, 12)
+        
+        log_header = QHBoxLayout()
+        log_title = QLabel("🖥️ 시스템 실시간 콘솔")
+        log_title.setStyleSheet("color: #666666; font-size: 10px; font-weight: bold;")
+        log_header.addWidget(log_title)
+        log_vbox.addLayout(log_header)
+
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        # 로그 텍스트용 전용 폰트
         self.log_text.setFont(QFont("Consolas", 10))
-        left_layout.addWidget(log_label)
-        left_layout.addWidget(self.log_text)
-
-        # 우측 레이아웃
-        right_layout = QVBoxLayout()
+        self.log_text.setStyleSheet("background-color: transparent; border: none; color: #888888;")
+        log_vbox.addWidget(self.log_text)
         
-        # 우측 상단: 파이프라인 감시 종목 & 다이버전스 상태 (macro_states)
-        watch_label = QLabel("감시 중인 종목 리스트 (5분봉 거시 다이버전스 대기 상태)")
-        watch_label.setFont(QFont("Apple SD Gothic Neo", 12, QFont.Bold))
-        self.watch_table = QTableWidget(0, 4)
-        self.watch_table.setHorizontalHeaderLabels(["종목명(코드)", "현재가", "1분봉 수", "5분봉 상태"])
-        self.watch_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.watch_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.watch_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.watch_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        right_layout.addWidget(watch_label)
-        right_layout.addWidget(self.watch_table, stretch=2)
-
-        # 우측 중단: 현재 자산 현황 레이블 (토스 스타일 분리형 위젯)
-        cash_widget = QWidget()
-        cash_widget.setMinimumHeight(56)
-        cash_widget.setStyleSheet("QWidget { background-color: #3182F6; border-radius: 12px; } QLabel { background-color: transparent; color: #FFFFFF; }")
-        cash_layout = QHBoxLayout(cash_widget)
-        cash_layout.setContentsMargins(16, 0, 16, 0)
-        
-        self.cash_title_label = QLabel("운영 주문 가능 예수금")
-        self.cash_title_label.setFont(QFont("Apple SD Gothic Neo", 12, QFont.Bold))
-        
-        self.cash_value_label = QLabel("동기화 중...")
-        self.cash_value_label.setFont(QFont("Apple SD Gothic Neo", 16, QFont.Bold))
-        self.cash_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        
-        cash_layout.addWidget(self.cash_title_label)
-        cash_layout.addWidget(self.cash_value_label)
-        right_layout.addWidget(cash_widget)
-
-        # 우측 하단: 보유 포지션 관리 테이블
-        pos_label = QLabel("오픈 포지션 현황")
-        pos_label.setFont(QFont("Apple SD Gothic Neo", 12, QFont.Bold))
-        self.pos_table = QTableWidget(0, 4)
-        self.pos_table.setHorizontalHeaderLabels(["종목명(코드)", "보유수량", "매입단가", "수익률(%)"])
-        self.pos_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.pos_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.pos_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.pos_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        right_layout.addWidget(pos_label)
-        right_layout.addWidget(self.pos_table, stretch=2)
-
-        # 비율 지정 후 메인 레이아웃에 결합
-        main_layout.addLayout(left_layout, stretch=4)
-        main_layout.addLayout(right_layout, stretch=6)
+        outer_layout.addWidget(log_card, stretch=2)
 
     def apply_dark_theme(self):
-        """토스/카카오 스타일의 모던 플랫 다크 모드 적용"""
+        """부드러운 파스텔 톤과 자연스러운 그라데이션이 적용된 하이엔드 다크 테마"""
         css = """
         QMainWindow, QWidget {
-            background-color: #121212;
-            color: #F8F9FA;
-            font-family: 'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', 'sans-serif';
+            background-color: #0F1012; 
+            color: #E8EAED;
+            font-family: 'Apple SD Gothic Neo', 'Pretendard', 'sans-serif';
+        }
+        QFrame#Card {
+            background-color: #1A1C1E; 
+            border-radius: 24px; /* 더 둥글고 부드러운 모서리 */
+            border: 1px solid #282A2D;
+        }
+        QFrame#SummaryCard {
+            background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1A1C1E, stop:1 #222529);
+            border-radius: 28px;
+            border: 1px solid #3C4043;
+        }
+        QFrame#Console {
+            background-color: #0B0C0D;
+            border-top: 1px solid #202124;
+            border-radius: 0px;
         }
         QLabel {
-            color: #E9ECEF;
-            font-weight: 600;
-            padding: 2px 0px;
-        }
-        QTextEdit {
-            background-color: #1E1E1E;
-            color: #CED4DA;
-            border: 1px solid #2C2C2E;
-            border-radius: 12px;
-            padding: 8px;
+            background-color: transparent; 
+            color: #BDC1C6;
+            border: none;
         }
         QTableWidget {
-            background-color: #1E1E1E;
-            color: #E9ECEF;
+            background-color: transparent;
+            color: #BDC1C6;
             gridline-color: transparent;
-            border: 1px solid #2C2C2E;
-            border-radius: 12px;
-            padding: 4px;
+            border: none;
             outline: none;
-            selection-background-color: rgba(49, 130, 246, 0.2);
-            selection-color: #F8F9FA;
+            selection-background-color: rgba(138, 180, 248, 0.1);
         }
-        QTableWidget::item {
-            border-bottom: 1px solid #2C2C2E;
-            padding: 4px;
+        /* [중요] 헤더 자체와 코너 버튼 배경을 투명하게 하여 짜투리 색상 제거 */
+        QHeaderView, QTableCornerButton::section {
+            background-color: transparent;
+            border: none;
         }
         QHeaderView::section {
-            background-color: #1E1E1E;
-            color: #ADB5BD;
+            background-color: #202124; 
+            color: #80868B; 
+            font-size: 11px;
             font-weight: bold;
-            padding: 10px 4px;
+            padding: 16px;
             border: none;
-            border-bottom: 1px solid #3E3E42;
+            border-bottom: 2px solid #1A1C1E;
         }
+        /* 테이블 헤더의 양 끝을 부드럽게 깎음 */
+        QHeaderView::section:horizontal:first {
+            border-top-left-radius: 16px;
+            border-bottom-left-radius: 4px;
+        }
+        QHeaderView::section:horizontal:last {
+            border-top-right-radius: 16px;
+            border-bottom-right-radius: 4px;
+        }
+        QTableWidget::item {
+            padding: 16px;
+            border-bottom: 1px solid #141517;
+        }
+        /* [스크롤바 현대화] */
         QScrollBar:vertical {
             border: none;
-            background: #121212;
-            width: 10px;
-            margin: 0px 0px 0px 0px;
+            background: transparent;
+            width: 6px; /* 더 얇게 */
+            margin: 0px 2px 0px 2px;
         }
         QScrollBar::handle:vertical {
-            background: #3E3E42;
-            min-height: 20px;
-            border-radius: 5px;
+            background: #3C4043;
+            min-height: 30px;
+            border-radius: 3px; /* 둥근 캡슐 형태 */
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #4A4D50; /* 호버 시 약간 강조 */
         }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
             border: none;
             background: none;
         }
+        QTextEdit {
+            background-color: transparent;
+            border: none;
+            color: #9AA0A6;
+        }
         """
         self.setStyleSheet(css)
 
     def append_log(self, msg):
-        """로거로부터 받은 메시지를 파싱하여 직관적인 색상과 가이드를 적용해 추가"""
         import html
         msg_escaped = html.escape(msg)
+        color = "#9AA0A6" # 기본 색상 (소프트 그레이)
         
-        # 기본 색상
-        color = "#D4D4D4"
-        suffix_guide = ""
+        # 키워드별 파스텔 하이라이트 적용
+        if "ERROR" in msg_escaped or "실패" in msg_escaped: 
+            color = "#FFAB91" # 파스텔 레드 (오류)
+        elif "WARNING" in msg_escaped or "경고" in msg_escaped: 
+            color = "#FFE082" # 파스텔 옐로우 (경고)
+        elif "매수" in msg_escaped or "체결" in msg_escaped or "진입" in msg_escaped: 
+            color = "#8AB4F8" # 파스텔 블루 (매수/진입)
+        elif "익절" in msg_escaped or "매도" in msg_escaped or "청산" in msg_escaped: 
+            color = "#FF8A80" # 파스텔 핑크 (매도/수익)
+        elif "시스템" in msg_escaped or "로그인" in msg_escaped or "완료" in msg_escaped: 
+            color = "#A5D6A7" # 파스텔 그린 (시스템/성공)
+        elif "스토틀링" in msg_escaped or "요청" in msg_escaped:
+            color = "#80868B" # 어두운 그레이 (흐름 데이터)
         
-        if " - ERROR - " in msg_escaped:
-            color = "#FF4D4D" # 눈에 띄는 빨간색
-            if "-202" in msg_escaped:
-                suffix_guide = "<br>&nbsp;&nbsp;↳ 💡 <b>[필수 확인 가이드]</b> 화면 우측 하단 키움 API 트레이 우클릭 -> [계좌비밀번호 저장] 작업이 누락되었습니다."
-            elif "64비트" in msg_escaped or "활성화 실패" in msg_escaped:
-                suffix_guide = "<br>&nbsp;&nbsp;↳ 💡 <b>[필수 확인 가이드]</b> 잘못된 환경입니다! 프로그램을 끄고 폴더 내 <u>start_bot.bat</u> 파일로 다시 실행하세요."
-        elif " - WARNING - " in msg_escaped:
-            color = "#FFA500" # 주황색
-        elif " - DEBUG - " in msg_escaped:
-            color = "#666666" # 어두운 회색 (눈에 덜 띄게)
-        elif " - INFO - " in msg_escaped:
-            if any(k in msg_escaped for k in ["매수", "주문", "체결", "진입", "ExecutionManager", "수익", "익절", "손절", "시그널"]):
-                color = "#4CAF50" # 거래/포지션 관련 (초록색)
-            elif any(k in msg_escaped for k in ["동기화", "데이터 요청", "로드", "조건검색", "QApplication", "CommConnect", "로그인"]):
-                color = "#00BCD4" # 시스템 이벤트 관련 (청록색)
-            elif "시스템 시작" in msg_escaped or "=====" in msg_escaped:
-                color = "#FFEB3B" # 봇 시작 등 강조 포인트 (노란색)
-                
-        # 최종 HTML 포맷 조합
-        styled_msg = f"<span style='color: {color};'>{msg_escaped}{suffix_guide}</span>"
+        # 스타일 적용된 메시지 생성
+        styled_msg = f"<span style='color: {color};'>{msg_escaped}</span>"
         self.log_text.append(styled_msg)
-        
-        # 자동 스크롤
-        scrollbar = self.log_text.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def update_dashboard(self):
-        """타이머에 의해 주기적으로 호출되어 백엔드 데이터를 끌어옵니다(Pull)."""
-        # 1. 예수금 라벨 업데이트
-        mode_str = "[시뮬레이션 (Virtual)]" if self.execution_manager.is_dry_run else "[운영 (Production)]"
-        cash = self.kiwoom.available_cash
-        self.cash_title_label.setText(f"{mode_str} 주문 가능 예수금")
-        self.cash_value_label.setText(f"{cash:,} 원")
+        # [1] 자산 정보 업데이트 (방어 코드 포함)
+        mode_str = "모의투자 시뮬레이션" if self.execution_manager.is_dry_run else "실거래 운영 모드"
+        cash = self.kiwoom.available_cash if self.kiwoom.available_cash is not None else 0
+        try:
+            self.cash_value_label.setText(f"{int(cash):,} 원")
+        except:
+            self.cash_value_label.setText("- 원")
 
-        # 2. 감시 종목 테이블 업데이트
-        with self.pipeline.lock:
-            monitored_codes = list(self.pipeline.data_1m.keys())
-            
-        # 우선순위 정렬: 5분봉 진입 대기(True)인 종목을 위로 올림
-        monitored_codes.sort(key=lambda x: self.strategy.macro_states.get(x, False), reverse=True)
-            
+        initial_assets = self.kiwoom.initial_total_assets
+        if initial_assets and initial_assets > 0:
+            limit_rate = self.execution_manager.LOSS_LIMIT_RATE
+            limit_amt = initial_assets * limit_rate
+            self.risk_limit_label.setText(f"손실 제한 한도: -{limit_amt:,.0f}원 ({limit_rate*100:.0f}%)")
+        else:
+            self.risk_limit_label.setText("손실 제한 한도: 계산 중...")
+
+        daily_pnl = self.execution_manager.daily_pnl if self.execution_manager.daily_pnl is not None else 0
+        try:
+            self.daily_pnl_label.setText(f"당일 손익: {daily_pnl:+, .0f}원")
+            # 파스텔 수익/손실 색상 적용
+            pnl_color = '#FF8A80' if daily_pnl > 0 else '#92B9F9' if daily_pnl < 0 else '#80868B'
+            self.daily_pnl_label.setStyleSheet(f"font-size: 19px; font-weight: bold; color: {pnl_color}; background: transparent;")
+        except:
+            pass
+
+        # [2] 운영 설정 (Config Panel)
+        ex = self.execution_manager
+        self.lbl_trade_mode.setText(f"💎 매매 모드: {mode_str}")
+        self.lbl_risk_rate.setText(f"💰 투자 비중: 종목당 {ex.INVEST_RATE_PER_STOCK*100:.1f}%")
+        self.lbl_profit_target.setText(f"🎯 목표 수익/손절: +{ex.TARGET_PROFIT*100:.1f}% / {ex.STOP_LOSS*100:.1f}%")
+        self.lbl_trailing.setText(f"📈 트레일링 스톱: {ex.TRAILING_STOP_ACTIVATION*100:.1f}% 발동 / {ex.TRAILING_STOP_CALLBACK*100:.1f}% 낙폭")
+        
+        rsi_p = os.getenv("INDICATOR_RSI_PERIOD", "14")
+        self.lbl_indicators.setText(f"📊 보조지표 설정: RSI({rsi_p}) | 볼린저밴드(20, 2.0)")
+
+        # [3] 감시 종목 테이블 (Kiwoom 엔진의 monitored_codes 기준)
+        monitored_codes = sorted(list(self.kiwoom.monitored_codes))
         self.watch_table.setRowCount(len(monitored_codes))
+        
         for row, code in enumerate(monitored_codes):
-            # 행 번호 및 상태 긁어오기
-            try:
-                df_1m = self.pipeline.data_1m.get(code)
-                candle_cnt = len(df_1m) if df_1m is not None else 0
-                current_price = df_1m['close'].iloc[-1] if df_1m is not None and not df_1m.empty else 0
-            except:
-                candle_cnt = 0
-                current_price = 0
+            df_1m = self.pipeline.data_1m.get(code)
             
-            # 종목명 가져오기 (캐시 처리)
+            # 데이터 로딩 중인 경우(None/Empty)에 대한 예외 처리 및 기본값 설정
+            has_data = df_1m is not None and not df_1m.empty
+            
+            if has_data:
+                # 지표 계산 (전략 클래스의 메서드 활용)
+                df_1m = self.strategy._calculate_indicators(df_1m)
+                current_price = df_1m['close'].iloc[-1]
+                rsi_val = df_1m['RSI'].iloc[-1] if 'RSI' in df_1m.columns else 0
+                bb_low = df_1m['BB_Lower'].iloc[-1] if 'BB_Lower' in df_1m.columns else 0
+                bb_up = df_1m['BB_Upper'].iloc[-1] if 'BB_Upper' in df_1m.columns else 0
+                open_p = df_1m['open'].iloc[0]
+            else:
+                current_price = 0
+                rsi_val = 0
+                bb_low = 0
+                bb_up = 0
+                open_p = 0
+
+            # 1. 등락률 (전일 종가 기준)
+            ref_p = self.pipeline.reference_prices.get(code, open_p)
+            change_rate = ((current_price - ref_p) / ref_p * 100) if ref_p > 0 else 0
+            
+            # 2. 수급(억)
+            stats = self.pipeline.day_stats.get(code, {'high': current_price, 'low': current_price, 'volume': 0})
+            trading_value_billion = (current_price * stats['volume']) / 100000000
+            
+            # 3. BB %B (위치)
+            bb_pct = ((current_price - bb_low) / (bb_up - bb_low) * 100) if (bb_up - bb_low) > 0 else 0
+            
+            # 4. 당일 위치 문자열(수치)
+            day_range = (stats['high'] - stats['low'])
+            day_pos_pct = ((current_price - stats['low']) / day_range * 100) if day_range > 0 else 0
+            
+            if not has_data:
+                day_pos_str = "대기 중..."
+            elif day_pos_pct <= 20: day_pos_str = f"바닥권({day_pos_pct:.0f}%)"
+            elif day_pos_pct <= 40: day_pos_str = f"저점부({day_pos_pct:.0f}%)"
+            elif day_pos_pct <= 60: day_pos_str = f"중위권({day_pos_pct:.0f}%)"
+            elif day_pos_pct <= 80: day_pos_str = f"고점부({day_pos_pct:.0f}%)"
+            else: day_pos_str = f"상단권({day_pos_pct:.0f}%)"
+
+            # 종목명
             if code not in self.code_names:
                 name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
                 self.code_names[code] = name.strip() if getattr(name, 'strip', None) else ""
-            display_name = f"{self.code_names[code]} ({code})" if self.code_names[code] else code
-
-            # 스테파노 전략 거시적 다이버전스(5m) 상태
+            
+            self.watch_table.setItem(row, 0, QTableWidgetItem(f"{self.code_names[code]} ({code})"))
+            
+            # 현재가 (등락률)
+            p_text = f"{int(current_price):,} ({change_rate:+.2f}%)" if has_data else "로딩 중..."
+            price_item = QTableWidgetItem(p_text)
+            price_item.setForeground(QColor("#FF8A80" if change_rate > 0 else "#92B9F9" if change_rate < 0 else "#BDC1C6"))
+            self.watch_table.setItem(row, 1, price_item)
+            
+            # RSI 신호 (화살표 아이콘)
+            if not has_data: rsi_signal = "⏳ 데이터 대기"
+            elif rsi_val <= 30: rsi_signal = f"⬇️ 과매도 ({rsi_val:.1f})"
+            elif rsi_val >= 70: rsi_signal = f"⬆️ 과매수 ({rsi_val:.1f})"
+            else: rsi_signal = f"↔️ 안정 ({rsi_val:.1f})"
+            
+            rsi_item = QTableWidgetItem(rsi_signal)
+            rsi_item.setForeground(QColor("#8AB4F8" if rsi_val <= 30 and has_data else "#FF8A80" if rsi_val >= 70 and has_data else "#BDC1C6"))
+            self.watch_table.setItem(row, 2, rsi_item)
+            
+            # 수급(억)
+            qv_text = f"{trading_value_billion:.1f}억" if has_data else "-"
+            self.watch_table.setItem(row, 3, QTableWidgetItem(qv_text))
+            
+            # BB 위치
+            bb_text = f"{bb_pct:.1f}%" if has_data else "-"
+            bb_item = QTableWidgetItem(bb_text)
+            if has_data and bb_pct <= 0: bb_item.setForeground(QColor("#FFAB91")) 
+            self.watch_table.setItem(row, 4, bb_item)
+            
+            # 당일 위치
+            day_pos_item = QTableWidgetItem(day_pos_str)
+            day_pos_item.setForeground(QColor("#A5D6A7" if has_data and day_pos_pct <= 30 else "#BDC1C6"))
+            self.watch_table.setItem(row, 5, day_pos_item)
+            
+            # 전략 상태
             is_macro = self.strategy.macro_states.get(code, False)
+            status_text = "🟢 진입대기" if is_macro else "🌑 관망"
+            item_status = QTableWidgetItem(status_text)
+            item_status.setForeground(QColor("#8AB4F8" if is_macro else "#5F6368"))
+            self.watch_table.setItem(row, 6, item_status)
 
-            item_code = QTableWidgetItem(display_name)
-            item_price = QTableWidgetItem(f"{int(current_price):,}" if current_price > 0 else "-")
-            item_cnt = QTableWidgetItem(f"{candle_cnt}봉")
-            
-            # 이모지 부활 및 텍스트 적용
-            state_text = "🟢 진입 대기" if is_macro else "🔴 관망"
-            item_state = QTableWidgetItem(state_text)
-            
-            # 상태 변경 시 텍스트 색상 우선순위
-            if is_macro:
-                item_state.setForeground(QColor("#3182F6"))
-                item_state.setFont(QFont("Apple SD Gothic Neo", 10, QFont.Bold))
-            else:
-                item_state.setForeground(QColor("#666666"))
-
-            item_code.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            item_price.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            item_cnt.setTextAlignment(Qt.AlignCenter)
-            item_state.setTextAlignment(Qt.AlignCenter)
-
-            self.watch_table.setItem(row, 0, item_code)
-            self.watch_table.setItem(row, 1, item_price)
-            self.watch_table.setItem(row, 2, item_cnt)
-            self.watch_table.setItem(row, 3, item_state)
-
-            # 토스 스타일의 은은한 하이라이트 배경
-            if is_macro:
-                bg_color = QColor(49, 130, 246, 20) # Toss Blue 얇은 배경
-                item_code.setBackground(bg_color)
-                item_price.setBackground(bg_color)
-                item_cnt.setBackground(bg_color)
-                item_state.setBackground(bg_color)
-
-        # 3. 오픈 포지션 테이블 업데이트
+        # [4] 포지션 테이블 업데이트
         positions = self.execution_manager.positions
         self.pos_table.setRowCount(len(positions))
         
-        row = 0
-        for code, data in positions.items():
-            qty = data['qty']
-            buy_price = data['buy_price']
-            
-            # 현재 1분봉의 가장 마지막 행 종가를 현재가로 취급
-            current_price = buy_price # 초기값 방어
+        # 자산 비중 계산을 위한 총 자산 산출
+        total_valuation = sum([p['qty'] * (self.pipeline.data_1m[c]['close'].iloc[-1] if c in self.pipeline.data_1m and not self.pipeline.data_1m[c].empty else p['buy_price']) for c, p in positions.items()])
+        total_account_value = (self.kiwoom.available_cash if self.kiwoom.available_cash is not None else 0) + total_valuation
+
+        for row, (code, data) in enumerate(positions.items()):
+            cur_p = data['buy_price']
+            open_p = cur_p
             with self.pipeline.lock:
                 if code in self.pipeline.data_1m and not self.pipeline.data_1m[code].empty:
-                    current_price = self.pipeline.data_1m[code]['close'].iloc[-1]
+                    df = self.pipeline.data_1m[code]
+                    cur_p = df['close'].iloc[-1]
+                    open_p = df['open'].iloc[0]
             
-            if buy_price > 0:
-                profit_rate = ((current_price - buy_price) / buy_price) * 100.0
-            else:
-                profit_rate = 0.0
-                
-            # 종목명 가져오기 (캐시 처리)
-            if code not in self.code_names:
-                name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
-                self.code_names[code] = name.strip() if getattr(name, 'strip', None) else ""
-            display_name = f"{self.code_names[code]} ({code})" if self.code_names[code] else code
-
-            item_code = QTableWidgetItem(display_name)
-            item_qty = QTableWidgetItem(str(qty))
-            item_price = QTableWidgetItem(f"{int(buy_price):,}")
-            item_profit = QTableWidgetItem(f"{profit_rate:.2f}%")
-
-            item_code.setTextAlignment(Qt.AlignCenter)
-            item_qty.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            item_price.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            item_profit.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-            # 수익률 색상 표현 (토스 주식 스타일: 빨강 핑크톤, 파랑 하늘톤)
-            item_profit.setFont(QFont("Apple SD Gothic Neo", 10, QFont.Bold))
-            if profit_rate > 0:
-                item_profit.setForeground(QColor("#F04452")) # 토스 레드
-            elif profit_rate < 0:
-                item_profit.setForeground(QColor("#3182F6")) # 토스 블루
-
-            self.pos_table.setItem(row, 0, item_code)
-            self.pos_table.setItem(row, 1, item_qty)
-            self.pos_table.setItem(row, 2, item_price)
-            self.pos_table.setItem(row, 3, item_profit)
-            row += 1
+            # 1. 기본 계산
+            ref_p = self.pipeline.reference_prices.get(code, data['buy_price'])
+            profit_rate = ((cur_p - data['buy_price']) / data['buy_price']) * 100.0 if data['buy_price'] > 0 else 0
+            pnl_amt = (cur_p - data['buy_price']) * data['qty']
+            invest_amt = data['buy_price'] * data['qty']
+            valuation_amt = cur_p * data['qty']
+            day_change_rate = ((cur_p - ref_p) / ref_p * 100) if ref_p > 0 else 0
+            pos_weight = (valuation_amt / total_account_value * 100) if total_account_value > 0 else 0
+            
+            # 2. 아이템 매핑
+            # 0: 종목명
+            self.pos_table.setItem(row, 0, QTableWidgetItem(f"{self.code_names.get(code, code)}"))
+            
+            # 1: 매입가
+            self.pos_table.setItem(row, 1, QTableWidgetItem(f"{int(data['buy_price']):,}"))
+            
+            # 2: 수익률 (색상 적용)
+            p_item = QTableWidgetItem(f"{profit_rate:+.2f}%")
+            p_color = "#FF8A80" if profit_rate > 0 else "#92B9F9" if profit_rate < 0 else "#80868B"
+            p_item.setForeground(QColor(p_color))
+            p_item.setFont(QFont("Verdana", 9, QFont.Bold))
+            self.pos_table.setItem(row, 2, p_item)
+            
+            # 3: 평가손익 (색상 적용)
+            pnl_item = QTableWidgetItem(f"{int(pnl_amt):+,}")
+            pnl_item.setForeground(QColor(p_color))
+            self.pos_table.setItem(row, 3, pnl_item)
+            
+            # 4: 매입금액
+            self.pos_table.setItem(row, 4, QTableWidgetItem(f"{int(invest_amt):,}"))
+            
+            # 5: 현재가
+            self.pos_table.setItem(row, 5, QTableWidgetItem(f"{int(cur_p):,}"))
+            
+            # 6: 보유수량
+            self.pos_table.setItem(row, 6, QTableWidgetItem(f"{data['qty']}"))
+            
+            # 7: 등락률 (당일)
+            dc_item = QTableWidgetItem(f"{day_change_rate:+.2f}%")
+            dc_color = "#FF8A80" if day_change_rate > 0 else "#92B9F9" if day_change_rate < 0 else "#80868B"
+            dc_item.setForeground(QColor(dc_color))
+            self.pos_table.setItem(row, 7, dc_item)
+            
+            # 8: 보유비중
+            w_item = QTableWidgetItem(f"{pos_weight:.1f}%")
+            w_item.setForeground(QColor("#A5D6A7")) # 소프트 그린
+            self.pos_table.setItem(row, 8, w_item)

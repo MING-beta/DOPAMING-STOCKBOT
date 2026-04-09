@@ -125,10 +125,32 @@ class EventHandler:
             if cash_str:
                 self.kc.available_cash = int(cash_str)
                 self.logger.info(f"💰 [예수금 동기화] 주문 가능 현금: {self.kc.available_cash:,} 원")
+                
+                # 리스크 가드용 초기 자산이 아직 0이라면, 현재 현금을 기준으로 즉시 초기화 (계산 중... 방지)
+                if self.kc.initial_total_assets == 0 and self.kc.available_cash > 0:
+                    self.kc.initial_total_assets = self.kc.available_cash
+                    self.logger.info(f"💎 [자산 초기화] 현금 기반 리스크 기준점 설정: {self.kc.initial_total_assets:,} 원")
             return
             
         # 2. 계좌 잔고 조회 TR 응답 처리
         elif sRQName == "opw00018_req":
+            # [추가] 총 자산 파싱 (단일 데이터)
+            # 모의투자/실전투자에 따라 필드명이 다를 수 있으므로 순차적 시도
+            target_fields = ["추정평가자산", "자산현황", "총평가금액"]
+            total_assets = 0
+            
+            for field in target_fields:
+                val = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, 0, field).strip()
+                if val and int(val) > 0:
+                    total_assets = int(val)
+                    self.logger.debug(f"계좌 자산 파싱 성공: {field}={total_assets}")
+                    break
+                
+            if total_assets > 0:
+                # 더 정확한 자산 정보(주식 평가액 포함)가 오면 업데이트
+                self.kc.initial_total_assets = total_assets
+                self.logger.info(f"💎 [자산 동기화 완료] 실시간 총 자산: {total_assets:,} 원 (리스크 기준점)")
+
             data_cnt = self.kc.dynamicCall("GetRepeatCnt(QString, QString)", sTrCode, sRQName)
             server_pos = {}
             for i in range(data_cnt):

@@ -18,7 +18,9 @@ from core.persistence import DatabaseManager
 from utils.notifier import SlackNotifier
 from utils.logger import setup_logger, add_gui_logger
 from ui.dashboard import Dashboard
+from utils.report_generator import ReportGenerator
 from PyQt5.QtCore import QTimer
+from concurrent.futures import ThreadPoolExecutor
 
 def main():
     """
@@ -97,28 +99,42 @@ def main():
         fallback_timer.start(15000)  # 15초 후 1회 실행
         kiwoom._fallback_timer = fallback_timer  # 참조 유지 (GC 방지)
         
-        # 12. 타이머 기반 전략 평가 및 손익 관리 분배 (10초 주기)
+        # 병렬 연산을 위한 단일 전용 워커 스레드 (UI와 연산 분리)
+        executor_pool = ThreadPoolExecutor(max_workers=1)
+        is_analyzing = False # 분석 중복 실행 방지 플래그
+
         def evaluate_strategy_and_positions():
-            with pipeline.lock:
-                codes = list(pipeline.data_1m.keys())
+            nonlocal is_analyzing
             
-            # 1. 오픈 포지션 손익 관리 (-2% 손절, +4% 익절)
+            # 1. 포지션 모니터링 및 미체결 감시 (메인 UI 스레드에서 안전하게 처리)
             execution_manager.monitor_positions(pipeline)
-            
-            # 2. ⏰ 미체결 주문 타임아웃 감시 (60초 초과 시 자동 취소 + Slack 경고)
             execution_manager.monitor_pending_orders()
             
-            # 3. 신규 진입 매수 시그널 탐색
-            for code in codes:
-                df_1m, df_5m = pipeline.get_data(code)
-                is_buy_signal = strategy.analyze(code, df_1m, df_5m)
-                if is_buy_signal:
-                    logger.warning(f"⭐⭐⭐ [{code}] 매수 시그널 발생! ExecutionManager 진입!")
-                    execution_manager.execute_buy(code, pipeline)
+            # 2. 신규 진입 매수 시그널 탐색 (백그라운드 스레드 위임)
+            if not execution_manager.is_risk_halt and not is_analyzing:
+                def background_analysis():
+                    nonlocal is_analyzing
+                    is_analyzing = True
+                    try:
+                        with pipeline.lock:
+                            codes = list(pipeline.data_1m.keys())
+                        
+                        for code in codes:
+                            df_1m, df_5m = pipeline.get_data(code)
+                            if strategy.analyze(code, df_1m, df_5m):
+                                # 매수 실행 (내부적으로 Throttler 큐를 사용하므로 스레드 안전)
+                                execution_manager.execute_buy(code, pipeline)
+                    except Exception as e:
+                        logger.error(f"⚠️ [전략 분석 스레드] 예외 발생: {e}")
+                    finally:
+                        is_analyzing = False
+
+                # 백그라운드 워커에게 전체 종목 분석 작업 할당
+                executor_pool.submit(background_analysis)
                     
         timer = QTimer()
         timer.timeout.connect(evaluate_strategy_and_positions)
-        timer.start(10000) # 10초마다 실행
+        timer.start(500) # [초저지연 최적화] 0.5초 주기로 기민하게 감시
 
 
         # 13. 슬랙 푸시 알림: 시작, 종료 및 헬스체크 설정
@@ -134,14 +150,36 @@ def main():
 
         # (3) 1분 헬스체크 (통신 장애 확인 및 시간별 스케줄 알림)
         notification_flags = {"market_open": False, "market_close": False}
+        reconnect_attempts = 0
+        MAX_RECONNECT_ATTEMPTS = int(os.getenv("RECONNECT_LIMIT", "5"))
         
         def health_check():
+            nonlocal reconnect_attempts
             # [A] 서버 접속 상태 체크
             state = kiwoom.get_connect_state()
             if state == 0:
-                error_msg = "🚨 *[헬스체크 경고]* 키움 API 서버와 통신이 끊어졌습니다. (재연결 확인 필요)"
+                reconnect_attempts += 1
+                error_msg = f"🚨 *[헬스체크 경고]* 키움 API 서버와 통신이 끊어졌습니다. (시도 {reconnect_attempts}/{MAX_RECONNECT_ATTEMPTS})"
                 logger.error(error_msg)
                 slack.send_message(error_msg)
+                
+                if reconnect_attempts <= MAX_RECONNECT_ATTEMPTS:
+                    # 재연결 시도
+                    kiwoom.reconnect()
+                    # 재연결 직후 상태 확인
+                    if kiwoom.get_connect_state() == 1:
+                        success_msg = "✅ *[재연결 성공]* 서버와 다시 연결되었습니다. 매매를 재개합니다."
+                        logger.info(success_msg)
+                        slack.send_message(success_msg)
+                        reconnect_attempts = 0 # 횟수 초기화
+                else:
+                    fatal_msg = "🛑 *[치명적 에러]* 최대 재연결 시도 횟수를 초과했습니다. 시스템을 안전하게 종료합니다."
+                    logger.critical(fatal_msg)
+                    slack.send_message(fatal_msg)
+                    app.quit()
+            else:
+                # 연결 상태 정상이면 횟수 초기화
+                reconnect_attempts = 0
                 
             # [B] 지정 시간(장시작/종료) 슬랙 알림
             now_str = datetime.now().strftime("%H:%M")
@@ -152,9 +190,24 @@ def main():
                 notification_flags["market_open"] = True
                 
             elif now_str == "15:30" and not notification_flags["market_close"]:
-                close_msg = "🌇 *[장 종료 알림]* 15:30 정규장이 마감되었습니다. 수고하셨습니다!"
-                logger.info(close_msg)
-                slack.send_message(close_msg)
+                # [고도화된 일일 수익 리포트 생성]
+                summary = db.get_daily_summary()
+                
+                # 종목코드 -> 이름 맵 생성
+                code_map = {}
+                for code in summary['stock_details'].keys():
+                    name = kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
+                    code_map[code] = name.strip() if hasattr(name, 'strip') else code
+                
+                # 리포트 생성
+                report_msg = ReportGenerator.generate_markdown_report(
+                    summary, 
+                    kiwoom.initial_total_assets, 
+                    code_to_name_map=code_map
+                )
+                
+                logger.info("장 종료 고도화 리포트 발송")
+                slack.send_message(report_msg)
                 notification_flags["market_close"] = True
                 
             # 자정(00:00)에 다음날을 위해 플래그 초기화

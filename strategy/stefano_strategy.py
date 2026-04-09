@@ -8,6 +8,7 @@ StefanoStrategy 모듈
 import pandas as pd
 import numpy as np
 import logging
+import os
 
 def _find_valleys(arr, distance=3):
     """
@@ -37,71 +38,82 @@ class StefanoStrategy:
         self.check_window = check_window
         # 거시적(5분봉) 다이버전스 상태 캐싱 {code: bool}
         self.macro_states = {}
+        # 지표 계산 결과 캐싱 { (code, timeframe): (last_index, df_result) }
+        self._indicator_cache = {}
 
     def analyze(self, code, df_1m: pd.DataFrame, df_5m: pd.DataFrame):
-        """
-        [전략 핵심 진입점] 
-        종목별 1분봉/5분봉 데이터를 받아 다이버전스 달성 여부를 분석하고
-        최종 진입(매수) 시그널(True/False)을 반환합니다.
-        
-        Args:
-            code (str): 종목코드
-            df_1m (pd.DataFrame): 1분봉 OHLCV
-            df_5m (pd.DataFrame): 5분봉 OHLCV
-            
-        Returns:
-            bool: 매수 시그널 발생 여부
-        """
         if df_1m.empty or df_5m.empty:
             return False
             
-        # 캔들이 충분히 모여있는지 체크 (최소 20개 이상 권장)
         if len(df_1m) < 20 or len(df_5m) < 20:
             return False
 
-        # 1. 보조지표 계산 (RSI, Volume Oscillator)
-        df_1m = self._calculate_indicators(df_1m)
-        df_5m = self._calculate_indicators(df_5m)
+        # 1. 보조지표 계산 (캐싱 적용된 고속 버전)
+        df_1m = self._get_cached_indicators(code, "1m", df_1m)
+        df_5m = self._get_cached_indicators(code, "5m", df_5m)
 
-        # 2. 5분봉(거시적) 다이버전스 감지 -> State 활성화
+        # 2. 5분봉(거시적) 다이버전스 감지
         macro_div = self._check_bullish_divergence(df_5m, window=self.check_window)
         if macro_div:
             self.macro_states[code] = True
-            self.logger.info(f"[{code}] 5분봉 거시적 상승 다이버전스 감지! 진입 State 활성화.")
+            self.logger.info(f"[{code}] 5분봉 상승 다이버전스 감지! 진입 State 활성화.")
 
-        # 3. State가 활성화된 종목에 한하여 1분봉(미시적) 다이버전스 확인
+        # 3. 1분봉(미시적) 이중 다이버전스 및 BB 하단 필터 확인
         if self.macro_states.get(code, False):
             micro_div = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
             if micro_div:
-                self.logger.warning(f"[{code}] 💥 1분봉 미시적 상승 다이버전스 발동! 매수 시그널 반환!")
-                # 시그널 무한 발생을 막기 위해 상태 초기화
-                self.macro_states[code] = False
-                return True
-
+                last_price = df_1m['close'].iloc[-1]
+                bb_lower = df_1m['BB_Lower'].iloc[-1]
+                
+                if last_price <= bb_lower * 1.005:
+                    self.logger.warning(f"[{code}] 💥 이중 다이버전스 + BB 하단 통과! 매수 시그널!")
+                    self.macro_states[code] = False
+                    return True
         return False
 
-    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
+    def _get_cached_indicators(self, code, timeframe, df):
+        """데이터 변경 시에만 지표를 재계산하는 고속 캐싱 메서드"""
+        current_last_idx = df.index[-1]
+        cache_key = (code, timeframe)
         
-        # 1. 수동 RSI 구현 (기본 Length=14)
+        # 캐시에 데이터가 있고, 마지막 캔들 시간이 동일하면(업데이트 없음) 캐시 반환
+        if cache_key in self._indicator_cache:
+            last_idx, cached_df = self._indicator_cache[cache_key]
+            # 인덱스 길까지 체크하여 데이터 정합성 보장
+            if last_idx == current_last_idx and len(cached_df) == len(df):
+                return cached_df
+                
+        # 변경사항 발생 시 재계산
+        calculated_df = self._calculate_indicators(df)
+        self._indicator_cache[cache_key] = (current_last_idx, calculated_df)
+        return calculated_df
+
+    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """핵심 지표 연산 (RSI, VO, BB)"""
+        df = df.copy()
+        rsi_period = int(os.getenv("INDICATOR_RSI_PERIOD", "14"))
         delta = df['close'].diff()
         up = delta.clip(lower=0)
         down = -1 * delta.clip(upper=0)
         
-        # 트레이딩뷰/야후파이낸스 스타일 RMA(수정 이동 평균)
-        alpha = 1 / 14
-        roll_up = up.ewm(alpha=alpha, min_periods=14, adjust=False).mean()
-        roll_down = down.ewm(alpha=alpha, min_periods=14, adjust=False).mean()
+        alpha = 1 / rsi_period
+        roll_up = up.ewm(alpha=alpha, min_periods=rsi_period, adjust=False).mean()
+        roll_down = down.ewm(alpha=alpha, min_periods=rsi_period, adjust=False).mean()
         
-        # ZeroDivision 방지
-        rs = roll_up / roll_down
+        rs = roll_up / (roll_down + 1e-9) # ZeroDivision 방지
         df['RSI'] = 100.0 - (100.0 / (1.0 + rs))
         
-        # 2. 수동 PVO (단기 12, 장기 26 이평선의 Percentage Volume Oscillator)
         ema12 = df['volume'].ewm(span=12, adjust=False).mean()
         ema26 = df['volume'].ewm(span=26, adjust=False).mean()
-        # ZeroDivision 방지 (ema26=0일 때 고려)
         df['VO'] = np.where(ema26 != 0, ((ema12 - ema26) / ema26) * 100.0, 0.0)
+        
+        bb_period = int(os.getenv("INDICATOR_BB_PERIOD", "20"))
+        bb_std = float(os.getenv("INDICATOR_BB_STD", "2.0"))
+        
+        df['MA20'] = df['close'].rolling(window=bb_period).mean()
+        df['STD20'] = df['close'].rolling(window=bb_period).std()
+        df['BB_Upper'] = df['MA20'] + (df['STD20'] * bb_std)
+        df['BB_Lower'] = df['MA20'] - (df['STD20'] * bb_std)
             
         return df.fillna(0)
 

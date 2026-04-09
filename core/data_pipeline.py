@@ -27,6 +27,8 @@ class DataPipeline:
         # 종목코드별 데이터 프레임을 저장할 딕셔너리
         self.data_1m = {}
         self.data_5m = {}
+        self.reference_prices = {}
+        self.day_stats = {} # {code: {'high': 0, 'low': 0, 'volume': 0}}
         
         # 데이터 접근 시 Thread-Safety 보장을 위한 Lock
         self.lock = threading.Lock()
@@ -137,6 +139,15 @@ class DataPipeline:
                         'close': 'last',
                         'volume': 'sum'
                     }).dropna()
+
+                    # 3. 당일 통계 정보 업데이트 (고가, 저가, 누적 거래량)
+                    if code not in self.day_stats:
+                        self.day_stats[code] = {'high': tick['price'], 'low': tick['price'], 'volume': tick['volume']}
+                    else:
+                        stats = self.day_stats[code]
+                        stats['high'] = max(stats['high'], tick['price'])
+                        stats['low'] = min(stats['low'], tick['price'])
+                        stats['volume'] += tick['volume']
 
                 self.tick_queue.task_done()
                 

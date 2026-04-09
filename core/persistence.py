@@ -125,3 +125,58 @@ class DatabaseManager:
                         del positions[code]
                         
         return positions
+
+    def get_daily_summary(self):
+        """당일 총 매수/매도액, 실현 손익, 승률 및 종목별 상세 내역 반환"""
+        today_key = datetime.now().strftime("%Y%m%d")
+        summary = {
+            'buy_count': 0, 'sell_count': 0,
+            'buy_total_amt': 0, 'sell_total_amt': 0,
+            'realized_pnl': 0,
+            'stock_details': {} # {code: {'pnl': 0, 'buy_amt': 0, 'sell_amt': 0, 'trades': 0}}
+        }
+        
+        with self.lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT code, price, qty, order_type FROM executions WHERE date_key = ?', (today_key,))
+            rows = cursor.fetchall()
+            conn.close()
+            
+        temp_pos = {} # {code: {avg_price, qty}}
+        
+        for row in rows:
+            code, price, qty, order_type = row
+            if code not in summary['stock_details']:
+                summary['stock_details'][code] = {'pnl': 0, 'buy_amt': 0, 'sell_amt': 0, 'trades': 0}
+            
+            detail = summary['stock_details'][code]
+            detail['trades'] += 1
+            
+            if order_type == '매수':
+                summary['buy_count'] += 1
+                amt = price * qty
+                summary['buy_total_amt'] += amt
+                detail['buy_amt'] += amt
+                
+                if code not in temp_pos:
+                    temp_pos[code] = {'avg_price': price, 'qty': qty}
+                else:
+                    curr = temp_pos[code]
+                    new_qty = curr['qty'] + qty
+                    curr['avg_price'] = ((curr['avg_price'] * curr['qty']) + (price * qty)) / new_qty
+                    curr['qty'] = new_qty
+            else:
+                summary['sell_count'] += 1
+                amt = price * qty
+                summary['sell_total_amt'] += amt
+                detail['sell_amt'] += amt
+                
+                if code in temp_pos:
+                    avg_buy_price = temp_pos[code]['avg_price']
+                    pnl = (price - avg_buy_price) * qty
+                    summary['realized_pnl'] += pnl
+                    detail['pnl'] += pnl
+                    temp_pos[code]['qty'] -= qty
+        
+        return summary

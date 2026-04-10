@@ -65,13 +65,21 @@ def main():
             logger.warning("가상(Mock) 환경이므로 계좌 비밀번호 검사를 무시합니다.")
             account_password = "0000"
             
-        # 7. 실행 제어 매니저 초기화 및 코어에 연동
+        # 5. 핵심 엔진 초기화 (전역 고정하여 GC로부터 보호)
+        pipeline = DataPipeline(kiwoom)
+        pipeline.start_pipeline()
+        kiwoom.set_data_pipeline(pipeline)
+        strategy = StefanoStrategy()
         execution_manager = ExecutionManager(kiwoom, db, slack, is_dry_run=is_dry_run)
+        
+        # [중요] 모든 핵심 객체를 kiwoom 인스턴스에 앵커링하여 함수 종료 후에도 생존 보장
+        kiwoom._pipeline_anchor = pipeline
+        kiwoom._strategy_anchor = strategy
+        kiwoom._execution_anchor = execution_manager
+        kiwoom._db_anchor = db
+        kiwoom._slack_anchor = slack
         kiwoom.set_execution_manager(execution_manager)
         
-        # 8. 전략 엔진 초기화
-        strategy = StefanoStrategy()
-
         # 9. GUI 대시보드 화면 생성 & 로깅 신호 연결
         dashboard = Dashboard(kiwoom, pipeline, execution_manager, strategy)
         gui_handler = add_gui_logger("DopamingBot")
@@ -135,8 +143,8 @@ def main():
                             
                             for code in codes:
                                 df_1m, df_5m = pipeline.get_data(code)
-                                # 분석 시작 전 하트비트 로그 (DEBUG)
-                                logger.debug(f"⚙️ [{code}] 전략 분석 엔진 가동 중...")
+                                # [심장 박동 로그] 사용자가 엔진 가동 여부를 명확히 알 수 있도록 레벨 격상
+                                logger.info(f"⚙️ [{code}] 초저지연 전략 분석 중...")
                                 if strategy.analyze(code, df_1m, df_5m):
                                     # 매수 실행 (내부적으로 Throttler 큐를 사용하므로 스레드 안전)
                                     execution_manager.execute_buy(code, pipeline)

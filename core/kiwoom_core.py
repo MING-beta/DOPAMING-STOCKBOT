@@ -1,13 +1,17 @@
 import sys
 import logging
 from PyQt5.QAxContainer import QAxWidget
-from PyQt5.QtCore import QEventLoop, QTimer
+from PyQt5.QtCore import QEventLoop, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QMessageBox
 
 from core.api_throttler import ApiThrottler
 from core.event_handlers import EventHandler
 
 class KiwoomCore(QAxWidget):
+    # [스레드 안전] 주문 요청 시그널 정의
+    # (sRQName, sScreenNo, sAccNo, nOrderType, sCode, nQty, nPrice, sHogaGb, sOrgOrderNo)
+    order_request_signal = pyqtSignal(str, str, str, int, str, int, int, str, str)
+
     """
     키움증권 Open API+ 통신 세션을 담당하는 싱글톤 클래스.
     본 클래스는 네트워크 통신 및 콜백 바인딩만 전담하며,

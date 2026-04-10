@@ -115,20 +115,36 @@ class StefanoStrategy:
 
     def _get_cached_indicators(self, code, timeframe, df):
         """데이터 변경 시에만 지표를 재계산하는 고속 캐싱 메서드"""
-        current_last_idx = df.index[-1]
-        cache_key = (code, timeframe)
-        
-        # 캐시에 데이터가 있고, 마지막 캔들 시간이 동일하면(업데이트 없음) 캐시 반환
-        if cache_key in self._indicator_cache:
-            last_idx, cached_df = self._indicator_cache[cache_key]
-            # 인덱스 길까지 체크하여 데이터 정합성 보장
-            if last_idx == current_last_idx and len(cached_df) == len(df):
-                return cached_df
-                
-        # 변경사항 발생 시 재계산
-        calculated_df = self._calculate_indicators(df)
-        self._indicator_cache[cache_key] = (current_last_idx, calculated_df)
-        return calculated_df
+        try:
+            current_last_idx = df.index[-1]
+            cache_key = (code, timeframe)
+            
+            if cache_key in self._indicator_cache:
+                last_cached_idx, cached_df = self._indicator_cache[cache_key]
+                if last_cached_idx == current_last_idx:
+                    return cached_df
+
+            # 지표 계산 단계 (안전성 확보)
+            df = df.copy()
+            
+            # RSI (14)
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df['RSI'] = 100 - (100 / (1 + rs))
+
+            # Bollinger Bands (20, 2)
+            df['SMA_20'] = df['close'].rolling(window=20).mean()
+            df['StdDev'] = df['close'].rolling(window=20).std()
+            df['BB_Upper'] = df['SMA_20'] + (df['StdDev'] * 2)
+            df['BB_Lower'] = df['SMA_20'] - (df['StdDev'] * 2)
+
+            self._indicator_cache[cache_key] = (current_last_idx, df)
+            return df
+        except Exception as e:
+            self.logger.error(f"⚠️ [{code}] {timeframe} 지표 계산 중 오류 발생: {e}")
+            return df
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """핵심 지표 연산 (RSI, VO, BB)"""

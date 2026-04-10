@@ -100,6 +100,11 @@ class ExecutionManager:
         if df_1m is None or df_1m.empty:
             self.logger.error(f"⚠️ [{code}] 현재가 데이터를 가져올 수 없어 매수를 포기합니다.")
             return
+            
+        # 1. 예수금 원천 차단 (쓸 돈이 전혀 없는 경우 조기 종료)
+        if self.kiwoom.available_cash is None or self.kiwoom.available_cash <= 0:
+            self.logger.warning(f"🚫 [주문 불가] 현재 주문 가능한 예수금액({self.kiwoom.available_cash}원)이 고갈되어 {code} 매수 프로세스를 전면 차단합니다.")
+            return
         
         current_price = int(df_1m['close'].iloc[-1])
         if current_price <= 0: return
@@ -137,14 +142,19 @@ class ExecutionManager:
         self.logger.warning(f"🚀 [{code}] 진입 매수 주문 발송 (가격: {current_price:,}원, 목표수량: {qty}주, 약 {qty*current_price:,}원)")
         self.kiwoom.send_order("BuyOrder", "1001", 1, code, qty, 0, "03", "")
         
-        # 미체결 추적 등록
+        # 미체결 추적 등록 및 예수금 선차감 (Race Condition 버그 방지)
         pending_key = f"BUY_{code}"
-        self.pending_orders[pending_key] = {
-            'code': code, 'qty': qty, 'order_type': '매수',
-            'sent_at': time.time(), 'screen_no': '1001'
-        }
-        msg = f"[매수 주문 접수] {code}, 수량: {qty} (약 {qty*current_price:,}원)"
-        self.slack.send_message(msg)
+        reserved_cash = qty * current_price
+        
+        with self.lock:
+            if self.kiwoom.available_cash is not None:
+                self.kiwoom.available_cash -= reserved_cash
+            
+            self.pending_orders[pending_key] = {
+                'code': code, 'qty': qty, 'order_type': '매수',
+                'sent_at': time.time(), 'screen_no': '1001',
+                'reserved_cash': reserved_cash
+            }
 
     def execute_sell(self, code, pipeline, sell_type="익절"):
         """보유 종목 시장가 전량 청산 (sell_type: '익절' 또는 '손절')"""
@@ -245,8 +255,16 @@ class ExecutionManager:
                 if (now - order['sent_at']) > self.ORDER_TIMEOUT_SEC
             ]
             
-            # 타임아웃 대상 추출
-            timed_out_orders = [self.pending_orders.pop(key) for key in timed_out_keys]
+            # 타임아웃 대상 추출 및 증발 자산 복구(Refund)
+            timed_out_orders = []
+            for key in timed_out_keys:
+                order = self.pending_orders.pop(key)
+                # 매수 예약금이 걸려있던 타임아웃 주문이면 예수금을 원래대로 100% 복원
+                if 'reserved_cash' in order and order['reserved_cash'] > 0:
+                    if self.kiwoom.available_cash is not None:
+                        self.kiwoom.available_cash += order['reserved_cash']
+                        self.logger.warning(f"[{order['code']}] 💸 미체결 타임아웃/취소에 따라 잠겨있던 예수금 {order['reserved_cash']:,}원이 계좌로 반환되었습니다.")
+                timed_out_orders.append(order)
         
         # 실제 API 호출(주문 취소)은 락 밖에서 수행하여 성능 확보
         for order in timed_out_orders:
@@ -277,31 +295,66 @@ class ExecutionManager:
         - order_type_code : "+매수", "-매도"
         """
         self.logger.info(f"[실체결 통지] {code} | 가격:{price} | 수량:{qty} | 타입:{order_type_code}")
+        
+        # 키움증권 서버에서 체결(Confirmation)이 완료된 이후에 확정 슬랙 알람 발송
+        msg = f"✅ [실제 체결 완료] {code} | {order_type_code} | 체결가: {price:,}원 | 수량: {qty}주"
+        self.slack.send_message(msg)
 
         with self.lock:
-            # 체결 확정 시 미체결 추적 목록에서 제거 (매수/매도 둘 다)
             pending_key = f"BUY_{code}" if "매수" in order_type_code else f"SELL_{code}"
+            
+            # [부분 체결 방어 로직] 
+            # 한 번에 전량 체결되지 않고 쪼개서 체결될 경우 예약금을 비율만큼만 돌려주고, 
+            # 남은 수량이 없을 때만 pending_orders에서 완전히 제거합니다.
+            refund_cash = 0
             if pending_key in self.pending_orders:
-                self.pending_orders.pop(pending_key)
-                self.logger.debug(f"[{code}] 체결 확인 → 미체결 추적 목록에서 제거")
+                order = self.pending_orders[pending_key]
+                if 'reserved_cash' in order and order['qty'] > 0:
+                    # 이번 체결 수량만큼의 비율을 계산하여 부분 환불
+                    ratio = qty / order['qty']
+                    refund_cash = int(order['reserved_cash'] * ratio)
+                    
+                    # 내부 장부 차감 (잔여량 관리)
+                    order['reserved_cash'] -= refund_cash
+                    order['qty'] -= qty
+                    
+                else:
+                    # 매도이거나 reserved_cash가 없는 경우 수량만 차감
+                    order['qty'] -= qty
+                    
+                # 잔여 수량이 없으면 감시 목록에서 최종 팝오프
+                if order['qty'] <= 0:
+                    self.pending_orders.pop(pending_key)
+                    self.logger.debug(f"[{code}] 전량 체결 확인 → 미체결 추적 목록에서 제거")
+                else:
+                    self.logger.debug(f"[{code}] 부분 체결 ({qty}주) → 잔여 미체결 대기: {order['qty']}주")
 
         # order_type_code 에 따른 내부 상태 정제
         with self.lock:
             if "매수" in order_type_code:
                 order_type = "매수"
+                # 자산 동기화 (예상 선차감액 부분 복구 후, '실제' 체결금액으로 최종 재차감)
+                if self.kiwoom.available_cash is not None:
+                    self.kiwoom.available_cash += refund_cash
+                    self.kiwoom.available_cash -= (price * qty)
+                    
                 # 메모리 포지션 업데이트
                 if code in self.positions:
                     old_qty = self.positions[code]['qty']
                     old_price = self.positions[code]['buy_price']
                     self.positions[code] = {
                         'buy_price': ((old_price * old_qty) + (price * qty)) / (old_qty + qty),
-                        'qty': old_qty + qty
+                        'qty': old_qty + qty,
+                        'high_price': max(self.positions[code].get('high_price', price), price)
                     }
                 else:
                     self.positions[code] = {'buy_price': price, 'qty': qty, 'high_price': price}
                     
             else: # 매도 체결
                 order_type = "매도(청산)"
+                # 자산 동기화 (예수금 반환)
+                if self.kiwoom.available_cash is not None:
+                    self.kiwoom.available_cash += (price * qty)
                 # 실현 손익 정산 (리스크 가드용)
                 if code in self.positions:
                     avg_buy_price = self.positions[code]['buy_price']

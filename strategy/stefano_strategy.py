@@ -46,6 +46,9 @@ class StefanoStrategy:
         
         # 공격적 매매 플래그 (타점 완화용)
         self.is_aggressive = os.getenv("AGGRESSIVE_MODE", "False").lower() == 'true'
+        
+        # 거래 체결 테스트 모드 플래그 (AND -> OR 조건으로 매수 빈도 폭증)
+        self.is_extreme_test = os.getenv("EXTREME_TEST_MODE", "False").lower() == 'true'
 
     def analyze(self, code, df_1m: pd.DataFrame, df_5m: pd.DataFrame):
         if df_1m.empty or df_5m.empty:
@@ -83,8 +86,21 @@ class StefanoStrategy:
                     reason = "시간 경과(30분)" if time_diff > 30 else "추세 회복(RSI > 50)"
                     self.logger.info(f"[{code}] 거시 신호가 유효하지 않아 {reason}로 대기 상태를 해제(Reset)합니다.")
 
+        # [테스트 모드: 모든 지표 상시 연산 및 OR 조건 매수]
+        if getattr(self, 'is_extreme_test', False):
+            micro_div = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
+            last_price = df_1m['close'].iloc[-1]
+            bb_lower = df_1m['BB_Lower'].iloc[-1]
+            bb_multiplier = 1.05 if getattr(self, 'is_aggressive', False) else 1.02
+            bb_touch = (last_price <= bb_lower * bb_multiplier)
+            
+            if macro_div or micro_div or bb_touch:
+                self.logger.warning(f"[{code}] 🧪 [체결 테스트 모드] OR 조건 충족 (5m={macro_div}, 1m={micro_div}, bb={bb_touch}) -> 조건 무시 매수 발동!")
+                self.macro_states[code] = False
+                return True
+                
         # 3. 1분봉(미시적) 이중 다이버전스 및 BB 하단 필터 확인
-        if self.macro_states.get(code, False):
+        elif self.macro_states.get(code, False):
             micro_div = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
             last_price = df_1m['close'].iloc[-1]
             bb_lower = df_1m['BB_Lower'].iloc[-1]
@@ -129,6 +145,9 @@ class StefanoStrategy:
         """핵심 지표 연산 (RSI, VO, BB)"""
         df = df.copy()
         rsi_period = int(os.getenv("INDICATOR_RSI_PERIOD", "14"))
+        
+        if getattr(self, 'is_aggressive', False):
+            rsi_period = 9  # 공격적 모드: RSI 기간 축소로 민감도 극대화
         delta = df['close'].diff()
         up = delta.clip(lower=0)
         down = -1 * delta.clip(upper=0)
@@ -146,6 +165,9 @@ class StefanoStrategy:
         
         bb_period = int(os.getenv("INDICATOR_BB_PERIOD", "20"))
         bb_std = float(os.getenv("INDICATOR_BB_STD", "2.0"))
+        
+        if getattr(self, 'is_aggressive', False):
+            bb_std = 1.5  # 공격적 모드: 밴드 너비를 좁혀 하단 터치(매수 기회) 확률 증폭
         
         df['MA20'] = df['close'].rolling(window=bb_period).mean()
         df['STD20'] = df['close'].rolling(window=bb_period).std()

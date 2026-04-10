@@ -189,25 +189,41 @@ class EventHandler:
                 pass
 
     def on_receive_chejan_data(self, sGubun, nItemCnt, sFidList):
-        """실제 매수/매도 주문 이후 체결 잔고 통보 수신 처리"""
-        if sGubun == "0": # 0: 주문 체결
+        """실제 매수/매도 주문 이후 체결 통보(0) 및 잔고 변경(1) 수신 처리"""
+        try:
+            # 상태 변수 모두 추출
             order_no = self.kc.dynamicCall("GetChejanData(int)", 9203).strip()
-            code = self.kc.dynamicCall("GetChejanData(int)", 9001).strip("A") # 'A005930' 등 형태 파싱
+            code = self.kc.dynamicCall("GetChejanData(int)", 9001).strip(" A")
             order_status = self.kc.dynamicCall("GetChejanData(int)", 913).strip()
-            
-            exec_price_str = self.kc.dynamicCall("GetChejanData(int)", 910).strip()
-            exec_qty_str = self.kc.dynamicCall("GetChejanData(int)", 911).strip()
             order_type_str = self.kc.dynamicCall("GetChejanData(int)", 905).strip() # '+매수', '-매도'
             
-            if exec_price_str and exec_qty_str:
-                try:
-                    price = int(exec_price_str)
-                    qty = int(exec_qty_str)
-                    if price > 0 and qty > 0 and self.kc.execution_manager:
-                        # 매니저에게 실제 DB 기록 및 포지션 업데이트 지시
-                        self.kc.execution_manager.record_execution(order_no, code, price, qty, order_status, order_type_str)
-                except ValueError:
-                    pass
+            # 파싱 정규화 (콤마, 마이너스 기호 제거)
+            exec_price_str = self.kc.dynamicCall("GetChejanData(int)", 910).replace(',', '').replace('+', '').replace('-', '').strip()
+            exec_qty_str = self.kc.dynamicCall("GetChejanData(int)", 911).replace(',', '').replace('+', '').replace('-', '').strip()
+            
+            if sGubun == "0":  # 0: 주문/체결
+                # 체결 이벤트 로깅 (접수, 확인, 체결 등 모든 상태)
+                self.logger.info(f"💌 [Chejan 체결 통보] 체결상태: {order_status} | 종목: {code} | {order_type_str} | 가격: {exec_price_str} | 수량: {exec_qty_str}")
+                
+                # 주문 상태가 '체결'에 도달했고 체결량이 발생했을 때만 기록
+                if order_status == "체결" and exec_price_str and exec_qty_str:
+                    try:
+                        price = int(exec_price_str)
+                        qty = int(exec_qty_str)
+                        
+                        if price > 0 and qty > 0 and self.kc.execution_manager:
+                            self.kc.execution_manager.record_execution(order_no, code, price, qty, order_status, order_type_str)
+                    except ValueError as e:
+                        self.logger.error(f"❌ [Chejan 파싱 에러] 체결가/체결량 변환 실패: {e}")
+                        
+            elif sGubun == "1": # 1: 잔고 변경
+                # 잔고 변경의 경우 보유수량(930), 매입단가(931) 등의 정보를 받아 즉시 자산을 동기화
+                pos_qty_str = self.kc.dynamicCall("GetChejanData(int)", 930).replace(',', '').strip()
+                pos_price_str = self.kc.dynamicCall("GetChejanData(int)", 931).replace(',', '').strip()
+                self.logger.info(f"💼 [Chejan 잔고 변경] 종목: {code} | 현재보유수량: {pos_qty_str} | 매입단가: {pos_price_str}")
+                
+        except Exception as e:
+            self.logger.error(f"❌ [Chejan 수신 에러] 구조적 결함 발생: {e}")
 
     def on_receive_tr_data(self, sScrNo, sRQName, sTrCode, sRecordName, sPrevNext, nDataLength, sErrorCode, sMessage, sSplmMsg):
         """특정 TR 단위 데이터(계좌, 과거 분봉 차트 등) 수신 및 파싱 처리"""

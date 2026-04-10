@@ -107,11 +107,14 @@ class Dashboard(QMainWindow):
         summary_vbox = QVBoxLayout(summary_card)
         summary_vbox.setContentsMargins(24, 24, 24, 24)
         
-        sum_title = QLabel("자산 운용 현황")
+        sum_title = QLabel("총 보유 자산 현황")
         sum_title.setStyleSheet("color: #ADB5BD; font-size: 11px; font-weight: bold; text-transform: uppercase;")
         
         self.cash_value_label = QLabel("로딩 중...")
         self.cash_value_label.setStyleSheet("font-size: 28px; font-weight: bold; color: #FFFFFF;")
+        
+        self.available_cash_label = QLabel("주문가능 예수금: -")
+        self.available_cash_label.setStyleSheet("color: #8AB4F8; font-size: 13px; font-weight: bold;")
         
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
@@ -125,6 +128,8 @@ class Dashboard(QMainWindow):
         
         summary_vbox.addWidget(sum_title)
         summary_vbox.addWidget(self.cash_value_label)
+        summary_vbox.addSpacing(4)
+        summary_vbox.addWidget(self.available_cash_label)
         summary_vbox.addSpacing(8)
         summary_vbox.addWidget(line)
         summary_vbox.addSpacing(16)
@@ -299,12 +304,19 @@ class Dashboard(QMainWindow):
     def update_dashboard(self):
         # [1] 자산 정보 업데이트 (방어 코드 포함)
         mode_str = "모의투자 시뮬레이션" if self.execution_manager.is_dry_run else "실거래 운영 모드"
+        
+        # 총 자산(예수금 + 주식평가액) 계산
+        positions = self.execution_manager.positions
+        total_valuation = sum([p['qty'] * (self.pipeline.data_1m[c]['close'].iloc[-1] if c in self.pipeline.data_1m and not self.pipeline.data_1m[c].empty else p['buy_price']) for c, p in positions.items()])
         cash = self.kiwoom.available_cash if self.kiwoom.available_cash is not None else 0
+        self.total_account_value = cash + total_valuation
+        
         try:
-            self.cash_value_label.setText(f"{int(cash):,} 원")
+            self.cash_value_label.setText(f"{int(self.total_account_value):,} 원")
+            self.available_cash_label.setText(f"주문가능 예수금: {int(cash):,}원")
         except:
             self.cash_value_label.setText("- 원")
-
+            self.available_cash_label.setText("주문가능 예수금: -")
         initial_assets = self.kiwoom.initial_total_assets
         if initial_assets and initial_assets > 0:
             limit_rate = self.execution_manager.LOSS_LIMIT_RATE
@@ -434,13 +446,7 @@ class Dashboard(QMainWindow):
             self.watch_table.setItem(row, 6, item_status)
 
         # [4] 포지션 테이블 업데이트
-        positions = self.execution_manager.positions
         self.pos_table.setRowCount(len(positions))
-        
-        # 자산 비중 계산을 위한 총 자산 산출
-        total_valuation = sum([p['qty'] * (self.pipeline.data_1m[c]['close'].iloc[-1] if c in self.pipeline.data_1m and not self.pipeline.data_1m[c].empty else p['buy_price']) for c, p in positions.items()])
-        total_account_value = (self.kiwoom.available_cash if self.kiwoom.available_cash is not None else 0) + total_valuation
-
         for row, (code, data) in enumerate(positions.items()):
             cur_p = data['buy_price']
             open_p = cur_p
@@ -457,7 +463,7 @@ class Dashboard(QMainWindow):
             invest_amt = data['buy_price'] * data['qty']
             valuation_amt = cur_p * data['qty']
             day_change_rate = ((cur_p - ref_p) / ref_p * 100) if ref_p > 0 else 0
-            pos_weight = (valuation_amt / total_account_value * 100) if total_account_value > 0 else 0
+            pos_weight = (valuation_amt / self.total_account_value * 100) if self.total_account_value > 0 else 0
             
             # 2. 아이템 매핑
             # 0: 종목명

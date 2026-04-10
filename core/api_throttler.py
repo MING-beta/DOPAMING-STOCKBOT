@@ -51,7 +51,9 @@ class ApiThrottler:
         
         if req_type == "send_order":
             args = req.get("args")
-            ret = self.kiwoom_core.dynamicCall("SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)", *args)
+            # PyQt5에서 dynamicCall은 최대로 8개의 가변 인자만 허용합니다.
+            # 인자가 9개인 SendOrder의 경우, 반드시 리스트 하나로 묶어서 넘겨야만 QVariantList로 정상 인식됩니다.
+            ret = self.kiwoom_core.dynamicCall("SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)", list(args))
             if ret == 0:
                 self.logger.info(f"🚀 [P{priority} 주문발송] 성공 - args={args}")
             else:

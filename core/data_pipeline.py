@@ -132,7 +132,11 @@ class DataPipeline:
                     
                     # 2. 1분봉 기반으로 5분봉 resample 연산
                     # [최적화] 매 틱마다 전체 리샘플링을 하지 않고, 1분 단위 인덱스가 새로 생성되었을 때만 수행
-                    if code not in self.data_5m or self.data_5m[code].index[-1] < minute_index:
+                    # [버그 수정] self.data_5m[code]가 비어있는 경우 index[-1] 참조 에러 방지 (empty 체크 추가)
+                    if (code not in self.data_5m or 
+                        self.data_5m[code].empty or 
+                        self.data_5m[code].index[-1] < minute_index):
+                        
                         self.data_5m[code] = self.data_1m[code].resample('5T').agg({
                             'open': 'first',
                             'high': 'max',

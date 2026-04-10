@@ -131,14 +131,15 @@ class DataPipeline:
                         }
                     
                     # 2. 1분봉 기반으로 5분봉 resample 연산
-                    # x분 단위 리샘플링은 pandas resample 활용
-                    self.data_5m[code] = self.data_1m[code].resample('5T').agg({
-                        'open': 'first',
-                        'high': 'max',
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
-                    }).dropna()
+                    # [최적화] 매 틱마다 전체 리샘플링을 하지 않고, 1분 단위 인덱스가 새로 생성되었을 때만 수행
+                    if code not in self.data_5m or self.data_5m[code].index[-1] < minute_index:
+                        self.data_5m[code] = self.data_1m[code].resample('5T').agg({
+                            'open': 'first',
+                            'high': 'max',
+                            'low': 'min',
+                            'close': 'last',
+                            'volume': 'sum'
+                        }).dropna()
 
                     # 3. 당일 통계 정보 업데이트 (고가, 저가, 누적 거래량)
                     if code not in self.day_stats:

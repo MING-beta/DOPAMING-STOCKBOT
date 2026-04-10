@@ -103,9 +103,10 @@ def main():
         # 병렬 연산을 위한 단일 전용 워커 스레드 (UI와 연산 분리)
         executor_pool = ThreadPoolExecutor(max_workers=1)
         is_analyzing = False # 분석 중복 실행 방지 플래그
+        last_report_time = 0 # [진단] 30초 주기 상태 보고용 시각
 
         def evaluate_strategy_and_positions():
-            nonlocal is_analyzing
+            nonlocal is_analyzing, last_report_time
             
             # 1. 포지션 모니터링 및 미체결 감시 (메인 UI 스레드에서 안전하게 처리)
             execution_manager.monitor_positions(pipeline)
@@ -113,6 +114,16 @@ def main():
             
             # 2. 신규 진입 매수 시그널 탐색 (백그라운드 스레드 위임)
             if not execution_manager.is_risk_halt and not is_analyzing:
+                # [진단] 주기적 상태 보고 (30초 간격)
+                now = time.time()
+                if now - last_report_time > 30:
+                    last_report_time = now
+                    waiting_codes = [c for c, state in strategy.macro_states.items() if state]
+                    if waiting_codes:
+                        logger.info(f"🔎 [상태 보고] 현재 매수 대기 종목: {waiting_codes}")
+                    else:
+                        logger.debug("🔎 [상태 보고] 현재 매수 대기 중인 종목이 없습니다.")
+
                 def background_analysis():
                     nonlocal is_analyzing
                     is_analyzing = True
@@ -122,6 +133,8 @@ def main():
                         
                         for code in codes:
                             df_1m, df_5m = pipeline.get_data(code)
+                            # 분석 시작 전 하트비트 로그 (DEBUG)
+                            logger.debug(f"⚙️ [{code}] 전략 분석 엔진 가동 중...")
                             if strategy.analyze(code, df_1m, df_5m):
                                 # 매수 실행 (내부적으로 Throttler 큐를 사용하므로 스레드 안전)
                                 execution_manager.execute_buy(code, pipeline)
@@ -136,6 +149,7 @@ def main():
         timer = QTimer()
         timer.timeout.connect(evaluate_strategy_and_positions)
         timer.start(500) # [초저지연 최적화] 0.5초 주기로 기민하게 감시
+        kiwoom._strategy_timer = timer  # [중요] 가비지 컬렉션 방지용 참조 유지
 
 
         # 13. 슬랙 푸시 알림: 시작, 종료 및 헬스체크 설정

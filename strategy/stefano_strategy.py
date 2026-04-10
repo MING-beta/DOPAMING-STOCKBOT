@@ -80,14 +80,23 @@ class StefanoStrategy:
         # 3. 1분봉(미시적) 이중 다이버전스 및 BB 하단 필터 확인
         if self.macro_states.get(code, False):
             micro_div = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
+            last_price = df_1m['close'].iloc[-1]
+            bb_lower = df_1m['BB_Lower'].iloc[-1]
+            rsi_1m = df_1m['RSI'].iloc[-1]
+            
+            # [진단 로깅] 매수 대기 중인 종목의 상세 지표를 INFO 레벨로 출력하여 대기 원인 분석
+            self.logger.info(f"[{code}] 🔎 대기중... RSI(1m)={rsi_1m:.1f}, 현재가={last_price:,}, BB하단={bb_lower:.1f}")
+            self.logger.info(f"[{code}] ❓ 매수조건: 1분 다이버전스={micro_div}, BB하단 근접={last_price <= bb_lower * 1.005}")
+
             if micro_div:
-                last_price = df_1m['close'].iloc[-1]
-                bb_lower = df_1m['BB_Lower'].iloc[-1]
-                
                 if last_price <= bb_lower * 1.005:
                     self.logger.warning(f"[{code}] 💥 이분봉 이중 다이버전스 + BB 하단 통과! 매수 실행!")
                     self.macro_states[code] = False
                     return True
+                else:
+                    self.logger.info(f"[{code}] ⚠️ 1분봉 다이버전스는 형성되었으나, 주가가 BB하단({bb_lower:.1f})보다 아직 0.5% 이상 높습니다.")
+            else:
+                self.logger.info(f"[{code}] ⏳ 아직 1분봉상 '이중 바닥(Divergence)' 신호가 완성되지 않았습니다.")
         return False
 
     def _get_cached_indicators(self, code, timeframe, df):

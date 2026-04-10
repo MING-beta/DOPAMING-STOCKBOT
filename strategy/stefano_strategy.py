@@ -42,11 +42,20 @@ class StefanoStrategy:
         # 지표 계산 결과 캐싱 { (code, timeframe): (last_index, df_result) }
         self._indicator_cache = {}
 
-    def analyze(self, code, df_1m: pd.DataFrame, df_5m: pd.DataFrame):
+    def analyze(self, code, df_1m, df_5m):
+        """
+        1분봉/5분봉 데이터를 분석하여 최종 매수 시그널 여부 판단
+        """
         if df_1m.empty or df_5m.empty:
             return False
             
         if len(df_1m) < 20 or len(df_5m) < 20:
+            return False
+
+        # [안전성 강화] 필수 지표 컬럼 존재 여부 확인 (KeyError 방어)
+        required = ['close', 'BB_Lower', 'RSI']
+        if not all(col in df_1m.columns for col in required):
+            # 지표가 아직 계산되지 않은 경우 (df_1m 업데이트 전)
             return False
 
         # 1. 보조지표 계산 (캐싱 적용된 고속 버전)

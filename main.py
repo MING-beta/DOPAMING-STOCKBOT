@@ -7,6 +7,7 @@ KiwoomCore, OpenAPI 통신, 데이터 파이프라인, 전략 매니저 및 GUI(
 
 import sys
 import os
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import QApplication

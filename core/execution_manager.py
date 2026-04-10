@@ -36,6 +36,16 @@ class ExecutionManager:
         self.TRAILING_STOP_ACTIVATION = float(os.getenv("TRAILING_STOP_ACTIVATION", "0.02"))
         self.TRAILING_STOP_CALLBACK = float(os.getenv("TRAILING_STOP_CALLBACK", "0.01"))
         
+        # [공격적 투자 모드] 스캘핑 최적화를 위한 타겟 오버라이드
+        is_aggressive = os.getenv("AGGRESSIVE_MODE", "False").lower() == 'true'
+        if is_aggressive:
+            self.logger.warning("🔥 [공격적 투자] 모드 활성화! 매매 빈도를 극대화하도록 스캘핑 타겟(익결/손절 1.5%, 트레일링 1.0% 활성)을 적용합니다.")
+            self.INVEST_RATE_PER_STOCK = 0.10     # 1개 종목 비중 10% (기본 5%보다 2배 증가, 빠른 회전 목적)
+            self.TARGET_PROFIT = 0.015          # 1.5% 익절
+            self.STOP_LOSS = -0.015             # 1.5% 손절
+            self.TRAILING_STOP_ACTIVATION = 0.010 # 1.0% 수익부터 이익 보존 스탑 켜짐
+            self.TRAILING_STOP_CALLBACK = 0.005   # 0.5% 하락시 즉각 청산
+        
         # 운영 설정 (환경변수 로드)
         self.ORDER_TIMEOUT_SEC = int(os.getenv("ORDER_PENDING_TIMEOUT", "60"))
         

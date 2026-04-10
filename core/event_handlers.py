@@ -48,6 +48,11 @@ class EventHandler:
         self.logger.info(f"[{strConditionName}] 검색 결과 수신")
         code_list = strCodeList.rstrip(';').split(';')
         if code_list == ['']: code_list = []
+        
+        # 블랙리스트(상한가 등) 사전 필터링
+        if hasattr(self.kc, 'blacklisted_codes'):
+            code_list = [c for c in code_list if c not in self.kc.blacklisted_codes]
+            
         self.logger.info(f"검색된 종목 수: {len(code_list)}건 -> {code_list}")
         
         # 감시 종목 상한제 적용 및 진입 시간 기록
@@ -73,6 +78,10 @@ class EventHandler:
         - strType == 'D': 조건 이탈 → 유예 리스트 등록 (잠시 후 삭제)
         """
         if strType == 'I':  # 편입
+            # 상한가 등으로 블랙리스트된 종목 원천 차단
+            if hasattr(self.kc, 'blacklisted_codes') and strCode in self.kc.blacklisted_codes:
+                return
+
             # [Hysteresis] 유예 목록에 있다면 즉시 복구 (삭제 예약 취소)
             if strCode in self.pending_removals:
                 del self.pending_removals[strCode]
@@ -96,7 +105,7 @@ class EventHandler:
                     active_positions = list(self.kc.execution_manager.positions.keys())
                 
                 # 감시 중인 종목 중 보유 중이지 않은 후보군 추출
-                candidates = {code: t for code in self.kc.monitored_codes if code not in active_positions}
+                candidates = {code: t for code, t in self.kc.monitored_codes.items() if code not in active_positions}
                 
                 if candidates:
                     # 가장 오래된(타임스탬프가 가장 작은) 종목 선정
@@ -148,10 +157,29 @@ class EventHandler:
             dt_time = self.kc.dynamicCall("GetCommRealData(QString, int)", sCode, 20).strip()
             price_str = self.kc.dynamicCall("GetCommRealData(QString, int)", sCode, 10).strip()
             volume_str = self.kc.dynamicCall("GetCommRealData(QString, int)", sCode, 15).strip()
+            fluctuation_str = self.kc.dynamicCall("GetCommRealData(QString, int)", sCode, 12).strip()
             
             if not price_str or not volume_str: return
                 
             try:
+                # 상한가(등락율 약 +29.8% 이상) 도달 종목 감시 영구 제외
+                if fluctuation_str:
+                    fluctuation_rate = float(fluctuation_str.replace('+', ''))
+                    if fluctuation_rate >= 29.8:
+                        if not hasattr(self.kc, 'blacklisted_codes'):
+                            self.kc.blacklisted_codes = set()
+                            
+                        if sCode not in self.kc.blacklisted_codes:
+                            self.logger.warning(f"🚫 [상한가 도달] {sCode} 종목이 상한가({fluctuation_rate}%)에 도달하여 감시를 영구 종료 및 제외합니다.")
+                            self.kc.blacklisted_codes.add(sCode)
+                            
+                            if sCode in self.kc.monitored_codes:
+                                del self.kc.monitored_codes[sCode]
+                                self.kc.set_real_remove("1000", sCode)
+                                if self.kc.data_pipeline:
+                                    self.kc.data_pipeline.remove_code(sCode)
+                        return # 상한가 종목은 틱 데이터 파이프라인 누적 컨텍스트에서 드롭
+
                 # 하락일 경우 음수가 올 수 있어 절댓값 처리
                 price = abs(int(price_str))
                 volume = abs(int(volume_str))
@@ -241,31 +269,41 @@ class EventHandler:
         # 3. 주식 분봉 차트 조회 TR 응답 처리
         elif sRQName.startswith("opt10080_req_"):
             code = sRQName.replace("opt10080_req_", "")
-            data_cnt = self.kc.dynamicCall("GetRepeatCnt(QString, QString)", sTrCode, sRQName)
-            if data_cnt == 0:
-                self.logger.warning(f"[{code}] 분봉 데이터 응답이 없습니다.")
+            
+            # GetCommDataEx를 사용하여 한 번에 2차원 배열로 전체 데이터를 받아옴으로써
+            # COM 객체 통신 부하 및 Qt Stack Buffer Overrun (0xc0000409) 에러 방지
+            data_arr = self.kc.dynamicCall("GetCommDataEx(QString, QString)", sTrCode, "주식분봉차트조회")
+            
+            if not data_arr:
+                self.logger.warning(f"[{code}] 분봉 데이터 응답이 없습니다 (GetCommDataEx 반환값 없음).")
                 return
                 
-            self.logger.info(f"[{code}] 분봉 과거 데이터 수신: {data_cnt} rows 파싱 시작...")
+            data_cnt = len(data_arr)
+            self.logger.info(f"[{code}] 분봉 과거 데이터 수신: {data_cnt} rows 파싱 시작 (GetCommDataEx)")
             records = []
             
-            for i in range(data_cnt):
-                dt_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "체결시간").strip()
-                open_p = abs(int(self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "시가").strip() or 0))
-                high_p = abs(int(self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "고가").strip() or 0))
-                low_p = abs(int(self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "저가").strip() or 0))
-                close_p = abs(int(self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "현재가").strip() or 0))
-                vol = abs(int(self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "거래량").strip() or 0))
-                
-                if len(dt_str) == 14: # YYYYMMDDHHMMSS 포맷 변환
-                    dt = datetime(
-                        int(dt_str[:4]), int(dt_str[4:6]), int(dt_str[6:8]),
-                        int(dt_str[8:10]), int(dt_str[10:12]), int(dt_str[12:14])
-                    )
-                    records.append({
-                        'date_idx': dt,
-                        'open': open_p, 'high': high_p, 'low': low_p, 'close': close_p, 'volume': vol
-                    })
+            for row in data_arr:
+                # opt10080 주식분봉차트조회 GetCommDataEx 반환 인덱스:
+                # 0:현재가, 1:거래량, 2:체결시간, 3:시가, 4:고가, 5:저가
+                try:
+                    close_p = abs(int(row[0].strip() or 0))
+                    vol = abs(int(row[1].strip() or 0))
+                    dt_str = row[2].strip()
+                    open_p = abs(int(row[3].strip() or 0))
+                    high_p = abs(int(row[4].strip() or 0))
+                    low_p = abs(int(row[5].strip() or 0))
+                    
+                    if len(dt_str) == 14: # YYYYMMDDHHMMSS
+                        dt = datetime(
+                            int(dt_str[:4]), int(dt_str[4:6]), int(dt_str[6:8]),
+                            int(dt_str[8:10]), int(dt_str[10:12]), int(dt_str[12:14])
+                        )
+                        records.append({
+                            'date_idx': dt,
+                            'open': open_p, 'high': high_p, 'low': low_p, 'close': close_p, 'volume': vol
+                        })
+                except (ValueError, IndexError):
+                    continue
 
             # DataFrame으로 묶어서 데이터 파이프라인으로 전송 (가장 빠른 시간이 위로 가도록 정렬)
             if records and self.kc.data_pipeline:

@@ -7,7 +7,6 @@ KiwoomCore, OpenAPI 통신, 데이터 파이프라인, 전략 매니저 및 GUI(
 
 import sys
 import os
-import time
 from datetime import datetime
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import QApplication
@@ -34,6 +33,13 @@ def main():
     logger.info("====================================")
     logger.info("시스템 시작: Dopaming-Stock-Bot")
     logger.info("====================================")
+
+    # 전역 예외 처리기 (PyQt5 슬롯 내부 예외 추적 및 Fast Fail 방지)
+    import traceback
+    def unhandled_exception_hook(exc_type, exc_value, exc_traceback):
+        logger.critical("❌ [치명적 오류] 처리되지 않은 예외 발생으로 종료 전 기록:")
+        logger.critical("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+    sys.excepthook = unhandled_exception_hook
 
     # 2. QApplication 객체 생성 (PyQt5 GUI, 이벤트 루프 필수)
     app = QApplication(sys.argv)
@@ -65,21 +71,13 @@ def main():
             logger.warning("가상(Mock) 환경이므로 계좌 비밀번호 검사를 무시합니다.")
             account_password = "0000"
             
-        # 5. 핵심 엔진 초기화 (전역 고정하여 GC로부터 보호)
-        pipeline = DataPipeline(kiwoom)
-        pipeline.start_pipeline()
-        kiwoom.set_data_pipeline(pipeline)
-        strategy = StefanoStrategy()
+        # 7. 실행 제어 매니저 초기화 및 코어에 연동
         execution_manager = ExecutionManager(kiwoom, db, slack, is_dry_run=is_dry_run)
-        
-        # [중요] 모든 핵심 객체를 kiwoom 인스턴스에 앵커링하여 함수 종료 후에도 생존 보장
-        kiwoom._pipeline_anchor = pipeline
-        kiwoom._strategy_anchor = strategy
-        kiwoom._execution_anchor = execution_manager
-        kiwoom._db_anchor = db
-        kiwoom._slack_anchor = slack
         kiwoom.set_execution_manager(execution_manager)
         
+        # 8. 전략 엔진 초기화
+        strategy = StefanoStrategy()
+
         # 9. GUI 대시보드 화면 생성 & 로깅 신호 연결
         dashboard = Dashboard(kiwoom, pipeline, execution_manager, strategy)
         gui_handler = add_gui_logger("DopamingBot")
@@ -112,56 +110,39 @@ def main():
         # 병렬 연산을 위한 단일 전용 워커 스레드 (UI와 연산 분리)
         executor_pool = ThreadPoolExecutor(max_workers=1)
         is_analyzing = False # 분석 중복 실행 방지 플래그
-        last_report_time = 0 # [진단] 30초 주기 상태 보고용 시각
 
         def evaluate_strategy_and_positions():
-            try:
-                nonlocal is_analyzing, last_report_time
-                
-                # 1. 포지션 모니터링 및 미체결 감시 (메인 UI 스레드에서 안전하게 처리)
-                execution_manager.monitor_positions(pipeline)
-                execution_manager.monitor_pending_orders()
-                
-                # 2. 신규 진입 매수 시그널 탐색 (백그라운드 스레드 위임)
-                if not execution_manager.is_risk_halt and not is_analyzing:
-                    # [진단] 주기적 상태 보고 (30초 간격)
-                    now = time.time()
-                    if now - last_report_time > 30:
-                        last_report_time = now
-                        waiting_codes = [c for c, state in strategy.macro_states.items() if state]
-                        if waiting_codes:
-                            logger.info(f"🔎 [상태 보고] 현재 매수 대기 종목: {waiting_codes}")
-                        else:
-                            logger.debug("🔎 [상태 보고] 현재 매수 대기 중인 종목이 없습니다.")
+            nonlocal is_analyzing
+            
+            # 1. 포지션 모니터링 및 미체결 감시 (메인 UI 스레드에서 안전하게 처리)
+            execution_manager.monitor_positions(pipeline)
+            execution_manager.monitor_pending_orders()
+            
+            # 2. 신규 진입 매수 시그널 탐색 (백그라운드 스레드 위임)
+            if not execution_manager.is_risk_halt and not is_analyzing:
+                def background_analysis():
+                    nonlocal is_analyzing
+                    is_analyzing = True
+                    try:
+                        with pipeline.lock:
+                            codes = list(pipeline.data_1m.keys())
+                        
+                        for code in codes:
+                            df_1m, df_5m = pipeline.get_data(code)
+                            if strategy.analyze(code, df_1m, df_5m):
+                                # 매수 실행 (내부적으로 Throttler 큐를 사용하므로 스레드 안전)
+                                execution_manager.execute_buy(code, pipeline)
+                    except Exception as e:
+                        logger.error(f"⚠️ [전략 분석 스레드] 예외 발생: {e}")
+                    finally:
+                        is_analyzing = False
 
-                    def background_analysis():
-                        nonlocal is_analyzing
-                        is_analyzing = True
-                        try:
-                            with pipeline.lock:
-                                codes = list(pipeline.data_1m.keys())
-                            
-                            for code in codes:
-                                df_1m, df_5m = pipeline.get_data(code)
-                                # [심장 박동 로그] 사용자가 엔진 가동 여부를 명확히 알 수 있도록 레벨 격상
-                                logger.info(f"⚙️ [{code}] 초저지연 전략 분석 중...")
-                                if strategy.analyze(code, df_1m, df_5m):
-                                    # 매수 실행 (내부적으로 Throttler 큐를 사용하므로 스레드 안전)
-                                    execution_manager.execute_buy(code, pipeline)
-                        except Exception as e:
-                            logger.error(f"⚠️ [전략 분석 스레드] 예외 발생: {e}")
-                        finally:
-                            is_analyzing = False
-
-                    # 백그라운드 워커에게 전체 종목 분석 작업 할당
-                    executor_pool.submit(background_analysis)
-            except Exception as e:
-                logger.error(f"🔥 [메인 감시 루프 치명적 에러] {e}", exc_info=True)
+                # 백그라운드 워커에게 전체 종목 분석 작업 할당
+                executor_pool.submit(background_analysis)
                     
         timer = QTimer()
         timer.timeout.connect(evaluate_strategy_and_positions)
         timer.start(500) # [초저지연 최적화] 0.5초 주기로 기민하게 감시
-        kiwoom._strategy_timer = timer  # [중요] 가비지 컬렉션 방지용 참조 유지
 
 
         # 13. 슬랙 푸시 알림: 시작, 종료 및 헬스체크 설정

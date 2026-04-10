@@ -131,19 +131,14 @@ class DataPipeline:
                         }
                     
                     # 2. 1분봉 기반으로 5분봉 resample 연산
-                    # [최적화] 매 틱마다 전체 리샘플링을 하지 않고, 1분 단위 인덱스가 새로 생성되었을 때만 수행
-                    # [버그 수정] self.data_5m[code]가 비어있는 경우 index[-1] 참조 에러 방지 (empty 체크 추가)
-                    if (code not in self.data_5m or 
-                        self.data_5m[code].empty or 
-                        self.data_5m[code].index[-1] < minute_index):
-                        
-                        self.data_5m[code] = self.data_1m[code].resample('5T').agg({
-                            'open': 'first',
-                            'high': 'max',
-                            'low': 'min',
-                            'close': 'last',
-                            'volume': 'sum'
-                        }).dropna()
+                    # x분 단위 리샘플링은 pandas resample 활용
+                    self.data_5m[code] = self.data_1m[code].resample('5T').agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
 
                     # 3. 당일 통계 정보 업데이트 (고가, 저가, 누적 거래량)
                     if code not in self.day_stats:
@@ -163,42 +158,31 @@ class DataPipeline:
 
     def add_historical_data(self, code, history_df_1m):
         """
-        [최초 적재 최적화] 메인 스레드 부하를 줄이기 위해 별도 스레드에서 
-        데이터 가공(리샘플링) 및 병합을 비동기적으로 수행합니다.
+        초기화 시 대량의 과거 1분봉 데이터를 한 번에 밀어넣습니다.
+        실시간으로 이미 수신된 데이터와 중복될 수 있으므로 병합 후 정렬합니다.
         """
-        if history_df_1m is None or history_df_1m.empty:
+        if history_df_1m.empty:
             return
             
-        import threading
-        def _async_process():
-            try:
-                # 1. 5분봉 리샘플링 (무거운 연산 - Lock 획득 전 수행)
-                df_5m = history_df_1m.resample('5T').agg({
-                    'open': 'first',
-                    'high': 'max',
-                    'low': 'min',
-                    'close': 'last',
-                    'volume': 'sum'
-                }).dropna()
+        with self.lock:
+            if code not in self.data_1m:
+                self.data_1m[code] = history_df_1m
+            else:
+                # 합치고, 인덱스 기준으로 중복 시 최신(마지막) 데이터 유지, 그리고 인덱스 정렬
+                combined = pd.concat([self.data_1m[code], history_df_1m])
+                combined = combined[~combined.index.duplicated(keep='last')]
+                self.data_1m[code] = combined.sort_index()
 
-                # 2. 메인 데이터 저장 (경량 연산 - 짧은 시간 Lock 점유)
-                with self.lock:
-                    if code not in self.data_1m:
-                        self.data_1m[code] = history_df_1m
-                    else:
-                        # 합치고, 인덱스 기준으로 중복 시 최신(마지막) 데이터 유지, 그리고 인덱스 정렬
-                        combined = pd.concat([self.data_1m[code], history_df_1m])
-                        combined = combined[~combined.index.duplicated(keep='last')]
-                        self.data_1m[code] = combined.sort_index()
-                    
-                    self.data_5m[code] = df_5m
-                self.logger.info(f"[{code}] 과거 차트 비동기 적재 완료 (1분봉 {len(history_df_1m)}개)")
-            except Exception as e:
-                self.logger.error(f"[{code}] 과거 차트 비동기 가공 중 오류: {e}")
-
-        # 스레드 생성 및 시작 (UI 프리징 방지)
-        worker = threading.Thread(target=_async_process, daemon=True)
-        worker.start()
+            # 5분봉 재가공
+            self.data_5m[code] = self.data_1m[code].resample('5T').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).dropna()
+            
+        self.logger.info(f"[{code}] 과거 차트 데이터 적재 완료: 1분봉 {len(self.data_1m[code])}개")
 
     def remove_code(self, code):
         """

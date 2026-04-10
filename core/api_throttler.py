@@ -51,7 +51,7 @@ class ApiThrottler:
         
         if req_type == "send_order":
             args = req.get("args")
-            ret = self.kiwoom_core.dynamicCall("SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)", *args)
+            ret = self.kiwoom_core.dynamicCall("SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)", list(args))
             if ret == 0:
                 self.logger.info(f"🚀 [P{priority} 주문발송] 성공 - args={args}")
             else:
@@ -106,3 +106,15 @@ class ApiThrottler:
         """시스템 보호 정지를 해제합니다."""
         self._is_paused = False
         self.logger.info("✅ [시스템 재개] API 요청 중단이 해제되었습니다.")
+
+    def clear_queue(self):
+        """현재 대기 중인 모든 API 요청을 강제로 삭제합니다."""
+        count = 0
+        while not self.request_queue.empty():
+            try:
+                self.request_queue.get_nowait()
+                count += 1
+            except queue.Empty:
+                break
+        if count > 0:
+            self.logger.warning(f"🧹 [큐 세척] 장 종료로 인해 대기 중이던 {count}개의 요청을 삭제했습니다.")

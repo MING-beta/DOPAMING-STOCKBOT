@@ -75,8 +75,9 @@ def main():
         execution_manager = ExecutionManager(kiwoom, db, slack, is_dry_run=is_dry_run)
         kiwoom.set_execution_manager(execution_manager)
         
-        # 8. 전략 엔진 초기화
+        # 8. 전략 엔진 초기화 및 지표 연산 등록 (백그라운드 최적화)
         strategy = StefanoStrategy()
+        pipeline.register_indicator_callback(strategy._calculate_indicators)
 
         # 9. GUI 대시보드 화면 생성 & 로깅 신호 연결
         dashboard = Dashboard(kiwoom, pipeline, execution_manager, strategy)
@@ -114,6 +115,11 @@ def main():
         def evaluate_strategy_and_positions():
             nonlocal is_analyzing
             
+            # [장 운영 시간 가드] 09:00 ~ 15:30 이외의 시간은 모든 매매 연산을 중단합니다.
+            now = datetime.now()
+            if now.hour < 9 or (now.hour >= 15 and now.minute > 30) or now.hour >= 16:
+                return
+
             # 1. 포지션 모니터링 및 미체결 감시 (메인 UI 스레드에서 안전하게 처리)
             execution_manager.monitor_positions(pipeline)
             execution_manager.monitor_pending_orders()
@@ -198,6 +204,10 @@ def main():
                 notification_flags["market_open"] = True
                 
             elif now_str == "15:30" and not notification_flags["market_close"]:
+                # [장 종료 클리닝] 미체결 및 요청 큐 강제 정리
+                kiwoom.throttler.clear_queue()
+                execution_manager.clear_pending_orders()
+
                 # [고도화된 일일 수익 리포트 생성]
                 summary = db.get_daily_summary()
                 

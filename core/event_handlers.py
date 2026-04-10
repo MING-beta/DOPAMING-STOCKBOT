@@ -217,6 +217,7 @@ class EventHandler:
             cash_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, 0, "주문가능금액").strip()
             if cash_str:
                 self.kc.available_cash = int(cash_str)
+                self.kc.reserved_cash = 0 # [동기화] 서버에서 실제 잔고를 받았으므로 로컬 예약금 초기화
                 self.logger.info(f"💰 [예수금 동기화] 주문 가능 현금: {self.kc.available_cash:,} 원")
                 
                 # 리스크 가드용 초기 자산이 아직 0이라면, 현재 현금을 기준으로 즉시 초기화 (계산 중... 방지)
@@ -242,6 +243,7 @@ class EventHandler:
             if total_assets > 0:
                 # 더 정확한 자산 정보(주식 평가액 포함)가 오면 업데이트
                 self.kc.initial_total_assets = total_assets
+                self.kc.reserved_cash = 0 # [동기화] 자산 갱신 시 예약금 초기화
                 self.logger.info(f"💎 [자산 동기화 완료] 실시간 총 자산: {total_assets:,} 원 (리스크 기준점)")
 
             data_cnt = self.kc.dynamicCall("GetRepeatCnt(QString, QString)", sTrCode, sRQName)

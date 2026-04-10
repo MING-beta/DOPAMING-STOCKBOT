@@ -36,9 +36,9 @@ class ReportGenerator:
         report = []
         report.append(f"🗓️ *[{now}] 일일 매매 성적표*")
         report.append("=" * 30)
-        report.append(f"{pnl_emoji} *당일 실현 손익: {pnl:+,}원 ({pnl_rate:+.2f}%)*")
+        report.append(f"{pnl_emoji} *당일 실현 손익: {int(pnl):+,}원 ({pnl_rate:+.2f}%)*")
         report.append(f"🎯 *당일 매매 승률: {win_rate:.1f}%* ({win_count}/{total_stocks} 종목 수익)")
-        report.append(f"💳 *거래 규모: 매수 {summary['buy_total_amt']:,.0f}원 | 매도 {summary['sell_total_amt']:,.0f}원*")
+        report.append(f"💳 *거래 규모: 매수 {int(summary['buy_total_amt']):,}원 | 매도 {int(summary['sell_total_amt']):,}원*")
         report.append("")
         
         # 종목별 상세 랭킹 산출
@@ -55,7 +55,7 @@ class ReportGenerator:
         if best:
             report.append("🏆 *오늘의 효자 종목 (TOP 3)*")
             for i, d in enumerate(best):
-                report.append(f"{i+1}. {d['name']}: {d['pnl']:+,}원")
+                report.append(f"{i+1}. {d['name']}: {int(d['pnl']):+,}원")
             report.append("")
 
         # Worst Top 3
@@ -64,7 +64,7 @@ class ReportGenerator:
         if worst:
             report.append("⚠️ *아쉬운 종목 (Worst 3)*")
             for i, d in enumerate(worst):
-                report.append(f"{i+1}. {d['name']}: {d['pnl']:+,}원")
+                report.append(f"{i+1}. {d['name']}: {int(d['pnl']):+,}원")
             report.append("")
             
         report.append("=" * 30)

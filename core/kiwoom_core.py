@@ -36,6 +36,7 @@ class KiwoomCore(QAxWidget):
         self.data_pipeline = None
         self.execution_manager = None
         self.available_cash = 0
+        self.reserved_cash = 0  # [시스템 보호] 주문 중인 가상 예약금 (중복 매수 방지)
         self._condition_loaded = False
         self.login_event_loop = None
         # 현재 실시간 감시 중인 종목 데이터: { 종목코드: 감시시작타임스탬프 }

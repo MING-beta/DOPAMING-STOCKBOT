@@ -83,6 +83,7 @@ class Dashboard(QMainWindow):
         pos_vbox.addWidget(pos_title)
 
         self.pos_table = QTableWidget(0, 9)
+        self.pos_table.setColumnCount(9)
         self.pos_table.setHorizontalHeaderLabels([
             "종목명", "매입가", "수익률", "평가손익", "매입금액", 
             "현재가", "보유수량", "등락률", "보유비중"
@@ -107,7 +108,7 @@ class Dashboard(QMainWindow):
         summary_vbox = QVBoxLayout(summary_card)
         summary_vbox.setContentsMargins(24, 24, 24, 24)
         
-        sum_title = QLabel("자산 운용 현황")
+        sum_title = QLabel("총 평가 자산 현황")
         sum_title.setStyleSheet("color: #ADB5BD; font-size: 11px; font-weight: bold; text-transform: uppercase;")
         
         self.cash_value_label = QLabel("로딩 중...")
@@ -117,11 +118,11 @@ class Dashboard(QMainWindow):
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet("background-color: rgba(255, 255, 255, 0.1); border: none; height: 1px;")
 
-        self.daily_pnl_label = QLabel("당일 손익: 0원")
+        self.daily_pnl_label = QLabel("당일 실현 손익: 0원")
         self.daily_pnl_label.setFont(QFont("Apple SD Gothic Neo", 15, QFont.Bold))
         
-        self.risk_limit_label = QLabel("리스크 한도: -")
-        self.risk_limit_label.setStyleSheet("color: #FFA500; font-size: 11px;")
+        self.risk_limit_label = QLabel("손실 제한 한도: -")
+        self.risk_limit_label.setStyleSheet("color: #F28B82; font-size: 11px;")
         
         summary_vbox.addWidget(sum_title)
         summary_vbox.addWidget(self.cash_value_label)
@@ -297,203 +298,169 @@ class Dashboard(QMainWindow):
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def update_dashboard(self):
-        # [1] 자산 정보 업데이트 (방어 코드 포함)
-        mode_str = "모의투자 시뮬레이션" if self.execution_manager.is_dry_run else "실거래 운영 모드"
-        cash = self.kiwoom.available_cash if self.kiwoom.available_cash is not None else 0
+        # [최적화] 대량 UI 업데이트 시 비동기 렌더링 억제로 스크롤 버벅임 방지
+        self.setUpdatesEnabled(False)
         try:
-            self.cash_value_label.setText(f"{int(cash):,} 원")
-        except:
-            self.cash_value_label.setText("- 원")
+            # [1] 대시보드 모드 정보 업데이트
+            mode_str = "모의투자 시뮬레이션" if self.execution_manager.is_dry_run else "실거래 운영 모드"
 
-        initial_assets = self.kiwoom.initial_total_assets
-        if initial_assets and initial_assets > 0:
-            limit_rate = self.execution_manager.LOSS_LIMIT_RATE
-            limit_amt = initial_assets * limit_rate
-            self.risk_limit_label.setText(f"손실 제한 한도: -{limit_amt:,.0f}원 ({limit_rate*100:.0f}%)")
-        else:
-            self.risk_limit_label.setText("손실 제한 한도: 계산 중...")
-
-        daily_pnl = self.execution_manager.daily_pnl if self.execution_manager.daily_pnl is not None else 0
-        try:
-            self.daily_pnl_label.setText(f"당일 손익: {daily_pnl:+, .0f}원")
-            # 파스텔 수익/손실 색상 적용
-            pnl_color = '#FF8A80' if daily_pnl > 0 else '#92B9F9' if daily_pnl < 0 else '#80868B'
-            self.daily_pnl_label.setStyleSheet(f"font-size: 19px; font-weight: bold; color: {pnl_color}; background: transparent;")
-        except:
-            pass
-
-        # [2] 운영 설정 (Config Panel)
-        ex = self.execution_manager
-        self.lbl_trade_mode.setText(f"💎 매매 모드: {mode_str}")
-        self.lbl_risk_rate.setText(f"💰 투자 비중: 종목당 {ex.INVEST_RATE_PER_STOCK*100:.1f}%")
-        self.lbl_profit_target.setText(f"🎯 목표 수익/손절: +{ex.TARGET_PROFIT*100:.1f}% / {ex.STOP_LOSS*100:.1f}%")
-        self.lbl_trailing.setText(f"📈 트레일링 스톱: {ex.TRAILING_STOP_ACTIVATION*100:.1f}% 발동 / {ex.TRAILING_STOP_CALLBACK*100:.1f}% 낙폭")
-        
-        rsi_p = os.getenv("INDICATOR_RSI_PERIOD", "14")
-        self.lbl_indicators.setText(f"📊 보조지표 설정: RSI({rsi_p}) | 볼린저밴드(20, 2.0)")
-
-        # [3] 감시 종목 테이블 (Kiwoom 엔진의 monitored_codes 기준)
-        # 정렬 우선순위: 1순위(진입대기 상태), 2순위(최근 발견된 기회순), 3순위(종목코드 순)
-        monitored_codes = sorted(
-            list(self.kiwoom.monitored_codes.keys()),
-            key=lambda c: (
-                0 if self.strategy.macro_states.get(c, False) else 1,    # 진입대기(0)가 관망(1)보다 우선
-                -self.kiwoom.monitored_codes.get(c, 0),                 # 최신 발견 종목 우선
-                c                                                       # 보조 정렬 (코드순)
-            )
-        )
-        self.watch_table.setRowCount(len(monitored_codes))
-        
-        for row, code in enumerate(monitored_codes):
-            df_1m = self.pipeline.data_1m.get(code)
-            
-            # 데이터 로딩 중인 경우(None/Empty)에 대한 예외 처리 및 기본값 설정
-            has_data = df_1m is not None and not df_1m.empty
-            
-            if has_data:
-                # 지표 계산 (전략 클래스의 메서드 활용)
-                df_1m = self.strategy._calculate_indicators(df_1m)
-                current_price = df_1m['close'].iloc[-1]
-                rsi_val = df_1m['RSI'].iloc[-1] if 'RSI' in df_1m.columns else 0
-                bb_low = df_1m['BB_Lower'].iloc[-1] if 'BB_Lower' in df_1m.columns else 0
-                bb_up = df_1m['BB_Upper'].iloc[-1] if 'BB_Upper' in df_1m.columns else 0
-                open_p = df_1m['open'].iloc[0]
+            # [2] 리스크 가드 및 실현 손익 정보 업데이트
+            ex = self.execution_manager
+            if ex.FIXED_LOSS_LIMIT > 0:
+                self.risk_limit_label.setText(f"손실 제한 한도: -{int(ex.FIXED_LOSS_LIMIT):,}원 (실현 손실 기준)")
+                self.risk_limit_label.setStyleSheet("color: #F28B82; font-size: 11px; font-weight: bold;")
             else:
-                current_price = 0
-                rsi_val = 0
-                bb_low = 0
-                bb_up = 0
-                open_p = 0
+                self.risk_limit_label.setText("손실 제한 한도: 미설정")
 
-            # 1. 등락률 (전일 종가 기준)
-            ref_p = self.pipeline.reference_prices.get(code, open_p)
-            change_rate = ((current_price - ref_p) / ref_p * 100) if ref_p > 0 else 0
-            
-            # 2. 수급(억)
-            stats = self.pipeline.day_stats.get(code, {'high': current_price, 'low': current_price, 'volume': 0})
-            trading_value_billion = (current_price * stats['volume']) / 100000000
-            
-            # 3. BB %B (위치)
-            bb_pct = ((current_price - bb_low) / (bb_up - bb_low) * 100) if (bb_up - bb_low) > 0 else 0
-            
-            # 4. 당일 위치 문자열(수치)
-            day_range = (stats['high'] - stats['low'])
-            day_pos_pct = ((current_price - stats['low']) / day_range * 100) if day_range > 0 else 0
-            
-            if not has_data:
-                day_pos_str = "대기 중..."
-            elif day_pos_pct <= 20: day_pos_str = f"바닥권({day_pos_pct:.0f}%)"
-            elif day_pos_pct <= 40: day_pos_str = f"저점부({day_pos_pct:.0f}%)"
-            elif day_pos_pct <= 60: day_pos_str = f"중위권({day_pos_pct:.0f}%)"
-            elif day_pos_pct <= 80: day_pos_str = f"고점부({day_pos_pct:.0f}%)"
-            else: day_pos_str = f"상단권({day_pos_pct:.0f}%)"
+            daily_pnl = ex.daily_pnl if ex.daily_pnl is not None else 0
+            try:
+                self.daily_pnl_label.setText(f"당일 실현 손익: {int(daily_pnl):+,}원")
+                # 파스텔 수익/손실 색상 적용
+                pnl_color = '#FF8A80' if daily_pnl > 0 else '#92B9F9' if daily_pnl < 0 else '#80868B'
+                self.daily_pnl_label.setStyleSheet(f"font-size: 19px; font-weight: bold; color: {pnl_color}; background: transparent;")
+            except:
+                pass
 
-            # 종목명
-            if code not in self.code_names:
-                name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
-                self.code_names[code] = name.strip() if getattr(name, 'strip', None) else ""
+            # [3] 운영 설정 (Config Panel)
+            self.lbl_trade_mode.setText(f"💎 매매 모드: {mode_str}")
+            self.lbl_risk_rate.setText(f"💰 투자 비중: 종목당 {ex.INVEST_RATE_PER_STOCK*100:.1f}%")
+            self.lbl_profit_target.setText(f"🎯 목표 수익/손절: +{ex.TARGET_PROFIT*100:.1f}% / {ex.STOP_LOSS*100:.1f}%")
+            self.lbl_trailing.setText(f"📈 트레일링 스톱: {ex.TRAILING_STOP_ACTIVATION*100:.1f}% 발동 / {ex.TRAILING_STOP_CALLBACK*100:.1f}% 낙폭")
             
-            self.watch_table.setItem(row, 0, QTableWidgetItem(f"{self.code_names[code]} ({code})"))
-            
-            # 현재가 (등락률)
-            p_text = f"{int(current_price):,} ({change_rate:+.2f}%)" if has_data else "로딩 중..."
-            price_item = QTableWidgetItem(p_text)
-            price_item.setForeground(QColor("#FF8A80" if change_rate > 0 else "#92B9F9" if change_rate < 0 else "#BDC1C6"))
-            self.watch_table.setItem(row, 1, price_item)
-            
-            # RSI 신호 (화살표 아이콘)
-            if not has_data: rsi_signal = "⏳ 데이터 대기"
-            elif rsi_val <= 30: rsi_signal = f"⬇️ 과매도 ({rsi_val:.1f})"
-            elif rsi_val >= 70: rsi_signal = f"⬆️ 과매수 ({rsi_val:.1f})"
-            else: rsi_signal = f"↔️ 안정 ({rsi_val:.1f})"
-            
-            rsi_item = QTableWidgetItem(rsi_signal)
-            rsi_item.setForeground(QColor("#8AB4F8" if rsi_val <= 30 and has_data else "#FF8A80" if rsi_val >= 70 and has_data else "#BDC1C6"))
-            self.watch_table.setItem(row, 2, rsi_item)
-            
-            # 수급(억)
-            qv_text = f"{trading_value_billion:.1f}억" if has_data else "-"
-            self.watch_table.setItem(row, 3, QTableWidgetItem(qv_text))
-            
-            # BB 위치
-            bb_text = f"{bb_pct:.1f}%" if has_data else "-"
-            bb_item = QTableWidgetItem(bb_text)
-            if has_data and bb_pct <= 0: bb_item.setForeground(QColor("#FFAB91")) 
-            self.watch_table.setItem(row, 4, bb_item)
-            
-            # 당일 위치
-            day_pos_item = QTableWidgetItem(day_pos_str)
-            day_pos_item.setForeground(QColor("#A5D6A7" if has_data and day_pos_pct <= 30 else "#BDC1C6"))
-            self.watch_table.setItem(row, 5, day_pos_item)
-            
-            # 전략 상태
-            is_macro = self.strategy.macro_states.get(code, False)
-            status_text = "🟢 진입대기" if is_macro else "🌑 관망"
-            item_status = QTableWidgetItem(status_text)
-            item_status.setForeground(QColor("#8AB4F8" if is_macro else "#5F6368"))
-            self.watch_table.setItem(row, 6, item_status)
+            rsi_p = os.getenv("INDICATOR_RSI_PERIOD", "14")
+            self.lbl_indicators.setText(f"📊 보조지표 설정: RSI({rsi_p}) | 볼린저밴드(20, 2.0)")
 
-        # [4] 포지션 테이블 업데이트
-        positions = self.execution_manager.positions
-        self.pos_table.setRowCount(len(positions))
-        
-        # 자산 비중 계산을 위한 총 자산 산출
-        total_valuation = sum([p['qty'] * (self.pipeline.data_1m[c]['close'].iloc[-1] if c in self.pipeline.data_1m and not self.pipeline.data_1m[c].empty else p['buy_price']) for c, p in positions.items()])
-        total_account_value = (self.kiwoom.available_cash if self.kiwoom.available_cash is not None else 0) + total_valuation
+            # [4] 감시 종목 테이블 (Kiwoom 엔진의 monitored_codes 기준)
+            monitored_codes = sorted(
+                list(self.kiwoom.monitored_codes.keys()),
+                key=lambda c: (
+                    0 if self.strategy.macro_states.get(c, False) else 1,
+                    -self.kiwoom.monitored_codes.get(c, 0),
+                    c
+                )
+            )
+            self.watch_table.setRowCount(len(monitored_codes))
+            
+            for row, code in enumerate(monitored_codes):
+                df_1m, _ = self.pipeline.get_data(code)
+                has_data = df_1m is not None and not df_1m.empty
+                
+                if has_data:
+                    # [최적화] 지표 계산 로직 제거 (이제 백그라운드 파이프라인에서 미리 계산됨)
+                    current_price = df_1m['close'].iloc[-1]
+                    rsi_val = df_1m['RSI'].iloc[-1] if 'RSI' in df_1m.columns else 0
+                    bb_low = df_1m['BB_Lower'].iloc[-1] if 'BB_Lower' in df_1m.columns else 0
+                    bb_up = df_1m['BB_Upper'].iloc[-1] if 'BB_Upper' in df_1m.columns else 0
+                    open_p = df_1m['open'].iloc[0]
+                else:
+                    current_price = 0
+                    rsi_val = 0
+                    bb_low = 0
+                    bb_up = 0
+                    open_p = 0
 
-        for row, (code, data) in enumerate(positions.items()):
-            cur_p = data['buy_price']
-            open_p = cur_p
-            with self.pipeline.lock:
-                if code in self.pipeline.data_1m and not self.pipeline.data_1m[code].empty:
-                    df = self.pipeline.data_1m[code]
-                    cur_p = df['close'].iloc[-1]
-                    open_p = df['open'].iloc[0]
-            
-            # 1. 기본 계산
-            ref_p = self.pipeline.reference_prices.get(code, data['buy_price'])
-            profit_rate = ((cur_p - data['buy_price']) / data['buy_price']) * 100.0 if data['buy_price'] > 0 else 0
-            pnl_amt = (cur_p - data['buy_price']) * data['qty']
-            invest_amt = data['buy_price'] * data['qty']
-            valuation_amt = cur_p * data['qty']
-            day_change_rate = ((cur_p - ref_p) / ref_p * 100) if ref_p > 0 else 0
-            pos_weight = (valuation_amt / total_account_value * 100) if total_account_value > 0 else 0
-            
-            # 2. 아이템 매핑
-            # 0: 종목명
-            self.pos_table.setItem(row, 0, QTableWidgetItem(f"{self.code_names.get(code, code)}"))
-            
-            # 1: 매입가
-            self.pos_table.setItem(row, 1, QTableWidgetItem(f"{int(data['buy_price']):,}"))
-            
-            # 2: 수익률 (색상 적용)
-            p_item = QTableWidgetItem(f"{profit_rate:+.2f}%")
-            p_color = "#FF8A80" if profit_rate > 0 else "#92B9F9" if profit_rate < 0 else "#80868B"
-            p_item.setForeground(QColor(p_color))
-            p_item.setFont(QFont("Verdana", 9, QFont.Bold))
-            self.pos_table.setItem(row, 2, p_item)
-            
-            # 3: 평가손익 (색상 적용)
-            pnl_item = QTableWidgetItem(f"{int(pnl_amt):+,}")
-            pnl_item.setForeground(QColor(p_color))
-            self.pos_table.setItem(row, 3, pnl_item)
-            
-            # 4: 매입금액
-            self.pos_table.setItem(row, 4, QTableWidgetItem(f"{int(invest_amt):,}"))
-            
-            # 5: 현재가
-            self.pos_table.setItem(row, 5, QTableWidgetItem(f"{int(cur_p):,}"))
-            
-            # 6: 보유수량
-            self.pos_table.setItem(row, 6, QTableWidgetItem(f"{data['qty']}"))
-            
-            # 7: 등락률 (당일)
-            dc_item = QTableWidgetItem(f"{day_change_rate:+.2f}%")
-            dc_color = "#FF8A80" if day_change_rate > 0 else "#92B9F9" if day_change_rate < 0 else "#80868B"
-            dc_item.setForeground(QColor(dc_color))
-            self.pos_table.setItem(row, 7, dc_item)
-            
-            # 8: 보유비중
-            w_item = QTableWidgetItem(f"{pos_weight:.1f}%")
-            w_item.setForeground(QColor("#A5D6A7")) # 소프트 그린
-            self.pos_table.setItem(row, 8, w_item)
+                ref_p = self.pipeline.reference_prices.get(code, open_p)
+                change_rate = ((current_price - ref_p) / ref_p * 100) if ref_p > 0 else 0
+                stats = self.pipeline.day_stats.get(code, {'high': current_price, 'low': current_price, 'volume': 0})
+                trading_value_billion = (current_price * stats['volume']) / 100000000
+                bb_pct = ((current_price - bb_low) / (bb_up - bb_low) * 100) if (bb_up - bb_low) > 0 else 0
+                day_range = (stats['high'] - stats['low'])
+                day_pos_pct = ((current_price - stats['low']) / day_range * 100) if day_range > 0 else 0
+                
+                if not has_data: day_pos_str = "대기 중..."
+                elif day_pos_pct <= 20: day_pos_str = f"바닥권({day_pos_pct:.0f}%)"
+                elif day_pos_pct <= 40: day_pos_str = f"저점부({day_pos_pct:.0f}%)"
+                elif day_pos_pct <= 60: day_pos_str = f"중위권({day_pos_pct:.0f}%)"
+                elif day_pos_pct <= 80: day_pos_str = f"고점부({day_pos_pct:.0f}%)"
+                else: day_pos_str = f"상단권({day_pos_pct:.0f}%)"
+
+                if code not in self.code_names:
+                    name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
+                    self.code_names[code] = name.strip() if getattr(name, 'strip', None) else ""
+                
+                self.watch_table.setItem(row, 0, QTableWidgetItem(f"{self.code_names[code]} ({code})"))
+                p_text = f"{int(current_price):,} ({change_rate:+.2f}%)" if has_data else "로딩 중..."
+                price_item = QTableWidgetItem(p_text)
+                price_item.setForeground(QColor("#FF8A80" if change_rate > 0 else "#92B9F9" if change_rate < 0 else "#BDC1C6"))
+                self.watch_table.setItem(row, 1, price_item)
+                
+                if not has_data: rsi_signal = "⏳ 데이터 대기"
+                elif rsi_val <= 30: rsi_signal = f"⬇️ 과매도 ({rsi_val:.1f})"
+                elif rsi_val >= 70: rsi_signal = f"⬆️ 과매수 ({rsi_val:.1f})"
+                else: rsi_signal = f"↔️ 안정 ({rsi_val:.1f})"
+                
+                rsi_item = QTableWidgetItem(rsi_signal)
+                rsi_item.setForeground(QColor("#8AB4F8" if rsi_val <= 30 and has_data else "#FF8A80" if rsi_val >= 70 and has_data else "#BDC1C6"))
+                self.watch_table.setItem(row, 2, rsi_item)
+                self.watch_table.setItem(row, 3, QTableWidgetItem(f"{trading_value_billion:.1f}억" if has_data else "-"))
+                
+                bb_item = QTableWidgetItem(f"{bb_pct:.1f}%" if has_data else "-")
+                if has_data and bb_pct <= 0: bb_item.setForeground(QColor("#FFAB91")) 
+                self.watch_table.setItem(row, 4, bb_item)
+                
+                day_pos_item = QTableWidgetItem(day_pos_str)
+                day_pos_item.setForeground(QColor("#A5D6A7" if has_data and day_pos_pct <= 30 else "#BDC1C6"))
+                self.watch_table.setItem(row, 5, day_pos_item)
+                
+                is_macro = self.strategy.macro_states.get(code, False)
+                status_text = "🟢 진입대기" if is_macro else "🌑 관망"
+                item_status = QTableWidgetItem(status_text)
+                item_status.setForeground(QColor("#8AB4F8" if is_macro else "#5F6368"))
+                self.watch_table.setItem(row, 6, item_status)
+
+            # [5] 포지션 테이블 업데이트
+            positions = self.execution_manager.positions
+            self.pos_table.setRowCount(len(positions))
+            total_valuation = sum([p['qty'] * (self.pipeline.data_1m[c]['close'].iloc[-1] if c in self.pipeline.data_1m and not self.pipeline.data_1m[c].empty else p['buy_price']) for c, p in positions.items()])
+            total_account_value = (self.kiwoom.available_cash if self.kiwoom.available_cash is not None else 0) + total_valuation
+
+            try:
+                self.cash_value_label.setText(f"{int(total_account_value):,} 원")
+            except:
+                self.cash_value_label.setText("- 원")
+
+            for row, (code, data) in enumerate(positions.items()):
+                if code not in self.code_names:
+                    name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
+                    self.code_names[code] = name.strip() if getattr(name, 'strip', None) else code
+
+                cur_p = data['buy_price']
+                ref_p = self.pipeline.reference_prices.get(code, data['buy_price'])
+                with self.pipeline.lock:
+                    if code in self.pipeline.data_1m and not self.pipeline.data_1m[code].empty:
+                        df = self.pipeline.data_1m[code]
+                        cur_p = df['close'].iloc[-1]
+                
+                profit_rate = ((cur_p - data['buy_price']) / data['buy_price']) * 100.0 if data['buy_price'] > 0 else 0
+                pnl_amt = (cur_p - data['buy_price']) * data['qty']
+                invest_amt = data['buy_price'] * data['qty']
+                valuation_amt = cur_p * data['qty']
+                day_change_rate = ((cur_p - ref_p) / ref_p * 100) if ref_p > 0 else 0
+                pos_weight = (valuation_amt / total_account_value * 100) if total_account_value > 0 else 0
+                
+                self.pos_table.setItem(row, 0, QTableWidgetItem(f"{self.code_names.get(code, code)}"))
+                self.pos_table.setItem(row, 1, QTableWidgetItem(f"{int(data['buy_price']):,}"))
+                
+                p_item = QTableWidgetItem(f"{profit_rate:+.2f}%")
+                p_color = "#FF8A80" if profit_rate > 0 else "#92B9F9" if profit_rate < 0 else "#80868B"
+                p_item.setForeground(QColor(p_color))
+                p_item.setFont(QFont("Verdana", 9, QFont.Bold))
+                self.pos_table.setItem(row, 2, p_item)
+                
+                pnl_item = QTableWidgetItem(f"{int(pnl_amt):+,}")
+                pnl_item.setForeground(QColor(p_color))
+                self.pos_table.setItem(row, 3, pnl_item)
+                self.pos_table.setItem(row, 4, QTableWidgetItem(f"{int(invest_amt):,}"))
+                self.pos_table.setItem(row, 5, QTableWidgetItem(f"{int(cur_p):,}"))
+                self.pos_table.setItem(row, 6, QTableWidgetItem(f"{data['qty']}"))
+                
+                dc_item = QTableWidgetItem(f"{day_change_rate:+.2f}%")
+                dc_color = "#FF8A80" if day_change_rate > 0 else "#92B9F9" if day_change_rate < 0 else "#80868B"
+                dc_item.setForeground(QColor(dc_color))
+                self.pos_table.setItem(row, 7, dc_item)
+                
+                w_item = QTableWidgetItem(f"{pos_weight:.1f}%")
+                w_item.setForeground(QColor("#A5D6A7"))
+                self.pos_table.setItem(row, 8, w_item)
+        finally:
+            self.setUpdatesEnabled(True)

@@ -33,6 +33,9 @@ class DataPipeline:
         # 데이터 접근 시 Thread-Safety 보장을 위한 Lock
         self.lock = threading.Lock()
         
+        # 지표 계산 콜백 (Strategy 엔진에서 등록)
+        self.indicator_callback = None
+        
         # 파이프라인 워커 스레드 제어 플래그
         self.is_running = False
         self.worker_thread = None
@@ -63,6 +66,11 @@ class DataPipeline:
             'price': float(abs(price)),
             'volume': float(abs(volume))
         })
+
+    def register_indicator_callback(self, func):
+        """지표 연산 함수를 등록합니다. (예: stefano_strategy._calculate_indicators)"""
+        self.indicator_callback = func
+        self.logger.info("파이프라인 지표 연산 콜백 등록 완료")
 
     def get_data(self, code):
         """
@@ -140,7 +148,11 @@ class DataPipeline:
                         'volume': 'sum'
                     }).dropna()
 
-                    # 3. 당일 통계 정보 업데이트 (고가, 저가, 누적 거래량)
+                    # 3. [최적화] 실시간 지표 연산 수행 (백그라운드 스레드)
+                    if self.indicator_callback:
+                        self.data_1m[code] = self.indicator_callback(self.data_1m[code])
+
+                    # 4. 당일 통계 정보 업데이트 (고가, 저가, 누적 거래량)
                     if code not in self.day_stats:
                         self.day_stats[code] = {'high': tick['price'], 'low': tick['price'], 'volume': tick['volume']}
                     else:

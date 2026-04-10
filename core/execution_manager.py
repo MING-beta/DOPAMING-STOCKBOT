@@ -28,6 +28,7 @@ class ExecutionManager:
         
         # 리스크 및 자금 관리 설정 (환경변수 로드)
         self.LOSS_LIMIT_RATE = float(os.getenv("RISK_LOSS_LIMIT_RATE", "0.20"))
+        self.FIXED_LOSS_LIMIT = float(os.getenv("RISK_FIXED_LOSS_LIMIT", "1000000"))
         self.INVEST_RATE_PER_STOCK = float(os.getenv("TRADE_INVEST_RATE", "0.05"))
         
         # 매매 목표 설정 (환경변수 로드)
@@ -78,11 +79,10 @@ class ExecutionManager:
             self.logger.info(f"실계좌 잔고 - [{code}] 평단: {data['buy_price']}, 수량: {data['qty']}")
 
     def execute_buy(self, code, pipeline):
-        # [리스크 가드] 신규 매수 전 당일 손실 한도 상시 체크 (초기 자금 로드된 경우만)
-        if not self.is_risk_halt and self.kiwoom.initial_total_assets > 0:
-            loss_limit = self.kiwoom.initial_total_assets * self.LOSS_LIMIT_RATE
-            if self.daily_pnl <= -loss_limit:
-                self.logger.critical(f"🛑 [리스크 가드] 당일 손실액({self.daily_pnl:,.0f}원)이 자산 대비 20% 한도({loss_limit:,.0f}원)에 도달. 신규 매수 금지.")
+        # [리스크 가드] 신규 매수 전 당일 실현 손실 한도 상시 체크
+        if not self.is_risk_halt and self.FIXED_LOSS_LIMIT > 0:
+            if self.daily_pnl <= -self.FIXED_LOSS_LIMIT:
+                self.logger.critical(f"🛑 [리스크 가드] 당일 실현 손실액({self.daily_pnl:,.0f}원)이 설정 한도({self.FIXED_LOSS_LIMIT:,.0f}원)에 도달. 신규 매수 금지.")
                 self.is_risk_halt = True
 
         if self.is_risk_halt:
@@ -116,35 +116,40 @@ class ExecutionManager:
         if qty == 0:
             qty = 1
             
-        # 3. 예수금 하한선 체크 및 최종 수량 확정
-        # 실제 매수 소요액 (세금/수수료 고려 없이 보수적으로 원금만 체크)
-        required_cash = qty * current_price
-        
-        if required_cash > self.kiwoom.available_cash:
-            # 현금 부족 시 살 수 있는 만큼만 (Maximum affordable)
-            qty = int(self.kiwoom.available_cash / current_price)
-            if qty <= 0:
-                self.logger.error(f"❌ [예수금 부족] {code} 1주를 살 현금도 부족합니다. (필요:{current_price:,}원 / 잔액:{self.kiwoom.available_cash:,}원)")
-                return
-            self.logger.warning(f"⚠️ [예수금 부족] 목표 비중({self.INVEST_RATE_PER_STOCK*100:.0f}%)보다 적은 {qty}주만 매수 시도합니다. (잔액에 맞춤)")
-
-        if self.is_dry_run:
-            self.logger.warning(f"🤖 [DRY-RUN 가상 매수] {code} - 가격: {current_price}, 수량: {qty} (비중: {((qty*current_price)/base_assets)*100:.1f}%)")
-            self.record_execution("VIRTUAL_B", code, current_price, qty, "체결완료", "+매수")
-            return
+        # 3. 예수금 하한선 체크 및 최종 수량 확정 (임계 구역 설정)
+        with self.lock:
+            # 실시간 가용 현금 계산: (서버 예수금) - (현재 주문 요청 중인 가상 예약금)
+            effective_cash = self.kiwoom.available_cash - self.kiwoom.reserved_cash
+            required_cash = qty * current_price
             
-        # Kiwoom 코어에 주문 위임
-        self.logger.warning(f"🚀 [{code}] 진입 매수 주문 발송 (가격: {current_price:,}원, 목표수량: {qty}주, 약 {qty*current_price:,}원)")
-        self.kiwoom.send_order("BuyOrder", "1001", 1, code, qty, 0, "03", "")
-        
-        # 미체결 추적 등록
-        pending_key = f"BUY_{code}"
-        self.pending_orders[pending_key] = {
-            'code': code, 'qty': qty, 'order_type': '매수',
-            'sent_at': time.time(), 'screen_no': '1001'
-        }
-        msg = f"[매수 주문 접수] {code}, 수량: {qty} (약 {qty*current_price:,}원)"
-        self.slack.send_message(msg)
+            if required_cash > effective_cash:
+                # 현금 부족 시 살 수 있는 만큼만 (Maximum affordable)
+                qty = int(effective_cash / current_price)
+                if qty <= 0:
+                    self.logger.error(f"❌ [예수금 부족] {code} 주문 차단 (가용:{effective_cash:,}원 / 필요:{current_price:,}원)")
+                    return
+                self.logger.warning(f"⚠️ [가용 현금 제한] 잔액에 맞춰 {qty}주로 수량을 조정합니다. (가용:{effective_cash:,}원)")
+
+            if self.is_dry_run:
+                self.logger.warning(f"🤖 [DRY-RUN 가상 매수] {code} - 가격: {current_price}, 수량: {qty}")
+                self.record_execution("VIRTUAL_B", code, current_price, qty, "체결완료", "+매수")
+                return
+                
+            # Kiwoom 코어에 주문 위임
+            self.logger.warning(f"🚀 [{code}] 진입 매수 주문 발송 (가격: {current_price:,}원, 수량: {qty}주)")
+            
+            # [핵심] 주문 발송 직후 가상 예약금 즉시 합산 (Race Condition 방지)
+            self.kiwoom.reserved_cash += (current_price * qty)
+            self.kiwoom.send_order("BuyOrder", "1001", 1, code, qty, 0, "03", "")
+            
+            # 미체결 추적 등록
+            pending_key = f"BUY_{code}"
+            self.pending_orders[pending_key] = {
+                'code': code, 'qty': qty, 'order_type': '매수',
+                'sent_at': time.time(), 'screen_no': '1001'
+            }
+        # msg = f"[매수 주문 접수] {code}, 수량: {qty} (약 {qty*current_price:,}원)"
+        # self.slack.send_message(msg)
 
     def execute_sell(self, code, pipeline, sell_type="익절"):
         """보유 종목 시장가 전량 청산 (sell_type: '익절' 또는 '손절')"""
@@ -173,8 +178,8 @@ class ExecutionManager:
             'code': code, 'qty': qty, 'order_type': f'매도({sell_type})',
             'sent_at': time.time(), 'screen_no': '1002'
         }
-        msg = f"[{sell_type} 주문 접수] 종목코드: {code}, 수량: {qty} (미체결 감시 시작)"
-        self.slack.send_message(msg)
+        # msg = f"[{sell_type} 주문 접수] 종목코드: {code}, 수량: {qty} (미체결 감시 시작)"
+        # self.slack.send_message(msg)
 
     def monitor_positions(self, pipeline):
         """
@@ -205,12 +210,11 @@ class ExecutionManager:
             high_price = pos_data['high_price']
             profit_rate = ((current_price - buy_price) / buy_price) * 100.0
             
-            # 2. 리스크 가드: 당일 손실 한도 체크 (자산의 20%)
-            if not self.is_risk_halt and self.kiwoom.initial_total_assets > 0:
-                loss_limit = self.kiwoom.initial_total_assets * self.LOSS_LIMIT_RATE
-                if self.daily_pnl <= -loss_limit:
-                    self.logger.critical(f"🛑 [리스크 가드 발동] 당일 손실액({self.daily_pnl:,.0f}원)이 한도({loss_limit:,.0f}원)에 도달했습니다. 모든 포지션을 정리하고 매매를 중단합니다.")
-                    self.slack.send_message(f"🛑 *[긴급]* 당일 손실 한도 도달! 모든 종목 청산 후 매매를 중단합니다. (손실: {self.daily_pnl:,.0f}원)")
+            # 2. 리스크 가드: 당일 실현 손실 한도 체크
+            if not self.is_risk_halt and self.FIXED_LOSS_LIMIT > 0:
+                if self.daily_pnl <= -self.FIXED_LOSS_LIMIT:
+                    self.logger.critical(f"🛑 [리스크 가드 발동] 당일 실현 손실액({self.daily_pnl:,.0f}원)이 한도({self.FIXED_LOSS_LIMIT:,.0f}원)에 도달했습니다. 모든 포지션을 정리하고 매매를 중단합니다.")
+                    self.slack.send_message(f"🛑 *[긴급]* 당일 실현 손실 한도 도달! 모든 종목 청산 후 매매를 중단합니다. (실현 손실: {self.daily_pnl:,.0f}원)")
                     self.is_risk_halt = True
             
             if self.is_risk_halt:
@@ -258,7 +262,7 @@ class ExecutionManager:
                 f"{elapsed}초 경과 후에도 미체결 상태입니다. → 자동 취소 시도"
             )
             self.logger.warning(warn_msg)
-            self.slack.send_message(warn_msg)
+            # self.slack.send_message(warn_msg)
             
             # 키움 API 주문 취소 (주문유형: 3=취소, 수량 0=전량취소)
             if not self.is_dry_run:
@@ -285,7 +289,8 @@ class ExecutionManager:
                 self.pending_orders.pop(pending_key)
                 self.logger.debug(f"[{code}] 체결 확인 → 미체결 추적 목록에서 제거")
 
-        # order_type_code 에 따른 내부 상태 정제
+        # order_type_code 에 따른 내부 상태 정제 및 알림 정보 생성
+        pnl_info = ""
         with self.lock:
             if "매수" in order_type_code:
                 order_type = "매수"
@@ -306,21 +311,37 @@ class ExecutionManager:
                 if code in self.positions:
                     avg_buy_price = self.positions[code]['buy_price']
                     pnl = (price - avg_buy_price) * qty
+                    profit_rate = (price - avg_buy_price) / avg_buy_price * 100
+                    pnl_info = f" | 수익: {int(pnl):+,}원 ({profit_rate:+.2f}%)"
+                    
                     self.daily_pnl += pnl
                     self.logger.debug(f"[{code}] 매도 체결로 인한 손익 발생: {pnl:,.0f}원 (당일 누적: {self.daily_pnl:,.0f}원)")
                     
                     # 매도 체결 즉시 리스크 가드 체크
-                    if not self.is_risk_halt and self.kiwoom.initial_total_assets > 0:
-                        loss_limit = self.kiwoom.initial_total_assets * self.LOSS_LIMIT_RATE
-                        if self.daily_pnl <= -loss_limit:
-                            self.logger.critical(f"🛑 [리스크 가드] 실시간 손실 한도 도달 ({self.daily_pnl:,.0f}원 / 한도: {loss_limit:,.0f}원)")
+                    if not self.is_risk_halt and self.FIXED_LOSS_LIMIT > 0:
+                        if self.daily_pnl <= -self.FIXED_LOSS_LIMIT:
+                            halt_msg = f"🛑 [리스크 가드] 실시간 손실 한도 도달 ({self.daily_pnl:,.0f}원 / 한도: {self.FIXED_LOSS_LIMIT:,.0f}원)"
+                            self.logger.critical(halt_msg)
+                            self.slack.send_message(halt_msg)
                             self.is_risk_halt = True
 
                     self.positions[code]['qty'] -= qty
                     if self.positions[code]['qty'] <= 0:
                         del self.positions[code]
         
-        # Slack 알림
-        self.slack.send_message(f"[{order_type} 체결완료] 종목:{code}, 가격:{price}, 수량:{qty}")
+        # 종목명 확보 및 알림 전송
+        name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
+        name = name.strip() if hasattr(name, 'strip') else code
+        
+        exec_msg = f"[{order_type} 체결완료] *{name}({code})* | {int(price):,}원 | {qty}주{pnl_info}"
+        self.slack.send_message(exec_msg)
         # DB 영속화
         self.db.insert_execution(order_no, code, price, qty, order_type)
+
+    def clear_pending_orders(self):
+        """현재 추적 중인 모든 미체결 주문 목록을 비웁니다."""
+        with self.lock:
+            count = len(self.pending_orders)
+            self.pending_orders.clear()
+            if count > 0:
+                self.logger.info(f"🗑️ [미체결 정리] 장 종료로 인해 {count}개의 미체결 추적을 중단했습니다.")

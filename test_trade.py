@@ -14,6 +14,7 @@ class TestExecutionSimulation(unittest.TestCase):
         kiwoom_mock = MagicMock()
         kiwoom_mock.initial_total_assets = 0 # int 비교를 위해 0으로 초기화
         kiwoom_mock.available_cash = 10000000 # 기본 1,000만원 설정 (qty 계산용)
+        kiwoom_mock.reserved_cash = 0 # 가상 예약 예수금 초기화 (에러 방지)
         db_mock = MagicMock()
         slack_mock = MagicMock()
         # ★ MagicMock이 아닌 실제 dict 반환으로 고정해야 함
@@ -120,31 +121,35 @@ class TestExecutionSimulation(unittest.TestCase):
 
 
 
+    # ─────────────────────────────────────────────�    # ─────────────────────────────────────────────────────────────────
+    # CASE 10: 리스크 가드 (당일 누적 손실 한도 초과 시 매매 중단)
     # ─────────────────────────────────────────────────────────────────
-    # CASE 7: 미체결 타임아웃 → Slack 경고 발송 검증
-    # ─────────────────────────────────────────────────────────────────
-    def test_pending_order_timeout_triggers_slack(self):
-        print("\n[CASE 7] 미체결 타임아웃 시 Slack 경고 발송 검증")
-        import time
+    def test_risk_guard_daily_limit(self):
+        print("\n[CASE 10] 리스크 가드(Daily Fixed Loss Limit - 200,000₩) 검증")
         manager, slack, _ = self._make_manager()
-
-        # DRY-RUN 매수는 즉시 체결되므로, 실전 모드로 pending 등록만 테스트
-        manager.is_dry_run = False  # 실전 모드로 전환
-        # pending_orders에 직접 60초 초과된 주문 삽입
-        manager.pending_orders["BUY_005930"] = {
-            'code': '005930', 'qty': 1, 'order_type': '매수',
-            'sent_at': time.time() - 65,  # 65초 전 주문 → 타임아웃 조건 충족
-            'screen_no': '1001'
-        }
-
-        manager.monitor_pending_orders()
-
-        # pending_orders에서 제거됐는지 확인
-        self.assertNotIn("BUY_005930", manager.pending_orders, "타임아웃된 주문이 pending에 남아있으면 안 됨!")
-        # Slack 경고 메시지가 발송됐는지 확인
-        self.assertTrue(slack.send_message.called, "Slack 타임아웃 경고가 발송되지 않음!")
-        warning_msgs = [c.args[0] for c in slack.send_message.call_args_list]
-        self.assertTrue(any("타임아웃" in m for m in warning_msgs), "타임아웃 경고 메시지 내용 확인 실패!")
+        
+        # 1. 초기 자산 및 한도 설정 (100만원 예시)
+        manager.kiwoom.initial_total_assets = 1000000 
+        manager.FIXED_LOSS_LIMIT = 200000 # 20만원 고정 한도 세팅
+        
+        # 2. 15만원 손실 상황 발생 유도 (아직 세이프)
+        # 1,000,000원에 사서 850,000원에 판 상황
+        manager.positions["100000"] = {'buy_price': 1000000, 'qty': 1, 'high_price': 1000000}
+        manager.record_execution("S1", "100000", 850000, 1, "체결", "-매도")
+        self.assertEqual(manager.daily_pnl, -150000)
+        self.assertFalse(manager.is_risk_halt, "15만원 손실에서는 중단되지 않아야 함")
+        
+        # 3. 25만원 손실 상황 발생 유도 (한도 20만원 초과)
+        # 2,000,000원에 사서 1,750,000원에 판 상황 (-25만)
+        manager.positions["200000"] = {'buy_price': 2000000, 'qty': 1, 'high_price': 2000000}
+        manager.record_execution("S2", "200000", 1900000, 1, "체결", "-매도") # 15만 + 10만 = 25만
+        self.assertTrue(manager.is_risk_halt, "고정 한도 초과 손실(25만) 시 중단되어야 함")
+        
+        # 4. 새로운 매수 시도 -> 리스크 가드에 의해 차단되어야 함
+        manager.execute_buy("005930", self._make_pipeline(70000))
+        self.assertNotIn("005930", manager.positions, "손실 한도 초과 후 신규 매수가 차단되어야 함")
+        
+        print(f"  -> 리스크 가드(고정 20만원 기준) 발동 및 거래 중단 확인 완료")�웃" in m for m in warning_msgs), "타임아웃 경고 메시지 내용 확인 실패!")
         safe_msg = warning_msgs[-1].encode('cp949', errors='replace').decode('cp949')
         print(f"  -> 타임아웃 경고 발송 확인 (내용은 로그 참조)")
 

@@ -16,6 +16,15 @@ class EventHandler:
         """
         self.kc = kiwoom_core
         self.logger = self.kc.logger
+        
+        # [Hysteresis] 이탈 유예 종목 관리: { 종목코드: 이탈시각 }
+        self.pending_removals = {}
+        
+        # 유예 기간이 지난 종목들을 자동 정리하는 타이머 (10초 간격)
+        from PyQt5.QtCore import QTimer
+        self.cleanup_timer = QTimer()
+        self.cleanup_timer.timeout.connect(self._cleanup_pending_removals)
+        self.cleanup_timer.start(10000) 
 
     def on_receive_condition_ver(self, lRet, sMsg):
         """서버로부터 조건검색식 목록을 성공적으로 받아왔을 때의 처리"""
@@ -61,9 +70,15 @@ class EventHandler:
         """
         실시간 조건검색 편입(I)/이탈(D) 이벤트 처리
         - strType == 'I': 조건 편입 → 감시 목록 추가 및 실시간 등록
-        - strType == 'D': 조건 이탈 → 감시 목록 제거 및 실시간 해제
+        - strType == 'D': 조건 이탈 → 유예 리스트 등록 (잠시 후 삭제)
         """
         if strType == 'I':  # 편입
+            # [Hysteresis] 유예 목록에 있다면 즉시 복구 (삭제 예약 취소)
+            if strCode in self.pending_removals:
+                del self.pending_removals[strCode]
+                self.logger.info(f"🔄 [유예 복구] {strCode} - 30초 이내 재편입되어 기존 데이터를 유지하고 분석을 계속합니다.")
+                return
+
             if strCode in self.kc.monitored_codes:
                 self.logger.debug(f"[실시간 조건 편입] {strCode} - 이미 감시 중, 무시")
                 return
@@ -105,15 +120,27 @@ class EventHandler:
             
         elif strType == 'D':  # 이탈
             if strCode in self.kc.monitored_codes:
-                del self.kc.monitored_codes[strCode]
-                self.logger.info(f"[실시간 조건 이탈] {strCode} ← {strConditionName} | 감시 종목: {len(self.kc.monitored_codes)}개")
-                # 해당 종목 실시간 수신 해제
-                self.kc.set_real_remove("1000", strCode)
-                # 파이프라인에서도 해당 종목 데이터 제거
-                if self.kc.data_pipeline:
-                    self.kc.data_pipeline.remove_code(strCode)
+                # [Hysteresis] 즉시 삭제하지 않고 유예 리스트에 등록
+                self.pending_removals[strCode] = time.time()
+                self.logger.info(f"⏳ [이탈 유예] {strCode} - 조건식에서 이탈했으나 30초간 데이터를 유지하며 추격합니다.")
             else:
                 self.logger.debug(f"[실시간 조건 이탈] {strCode} - 감시 목록에 없음, 무시")
+
+    def _cleanup_pending_removals(self):
+        """30초 이상 조건식으로 돌아오지 않은 종목들을 시스템에서 완전히 제거합니다."""
+        now = time.time()
+        to_delete = [code for code, exit_time in self.pending_removals.items() if now - exit_time >= 30]
+        
+        for code in to_delete:
+            del self.pending_removals[code]
+            if code in self.kc.monitored_codes:
+                del self.kc.monitored_codes[code]
+                self.logger.warning(f"🗑️ [최종 제거] {code} - 유예 시간(30초) 초과로 감시를 종료합니다.")
+                
+                # 실시간 수신 해제 및 파이프라인 데이터 삭제
+                self.kc.set_real_remove("1000", code)
+                if self.kc.data_pipeline:
+                    self.kc.data_pipeline.remove_code(code)
 
     def on_receive_real_data(self, sCode, sRealType, sRealData):
         """주식 체결(실시간) 틱 데이터 수신 처리"""

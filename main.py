@@ -106,45 +106,48 @@ def main():
         last_report_time = 0 # [진단] 30초 주기 상태 보고용 시각
 
         def evaluate_strategy_and_positions():
-            nonlocal is_analyzing, last_report_time
-            
-            # 1. 포지션 모니터링 및 미체결 감시 (메인 UI 스레드에서 안전하게 처리)
-            execution_manager.monitor_positions(pipeline)
-            execution_manager.monitor_pending_orders()
-            
-            # 2. 신규 진입 매수 시그널 탐색 (백그라운드 스레드 위임)
-            if not execution_manager.is_risk_halt and not is_analyzing:
-                # [진단] 주기적 상태 보고 (30초 간격)
-                now = time.time()
-                if now - last_report_time > 30:
-                    last_report_time = now
-                    waiting_codes = [c for c, state in strategy.macro_states.items() if state]
-                    if waiting_codes:
-                        logger.info(f"🔎 [상태 보고] 현재 매수 대기 종목: {waiting_codes}")
-                    else:
-                        logger.debug("🔎 [상태 보고] 현재 매수 대기 중인 종목이 없습니다.")
+            try:
+                nonlocal is_analyzing, last_report_time
+                
+                # 1. 포지션 모니터링 및 미체결 감시 (메인 UI 스레드에서 안전하게 처리)
+                execution_manager.monitor_positions(pipeline)
+                execution_manager.monitor_pending_orders()
+                
+                # 2. 신규 진입 매수 시그널 탐색 (백그라운드 스레드 위임)
+                if not execution_manager.is_risk_halt and not is_analyzing:
+                    # [진단] 주기적 상태 보고 (30초 간격)
+                    now = time.time()
+                    if now - last_report_time > 30:
+                        last_report_time = now
+                        waiting_codes = [c for c, state in strategy.macro_states.items() if state]
+                        if waiting_codes:
+                            logger.info(f"🔎 [상태 보고] 현재 매수 대기 종목: {waiting_codes}")
+                        else:
+                            logger.debug("🔎 [상태 보고] 현재 매수 대기 중인 종목이 없습니다.")
 
-                def background_analysis():
-                    nonlocal is_analyzing
-                    is_analyzing = True
-                    try:
-                        with pipeline.lock:
-                            codes = list(pipeline.data_1m.keys())
-                        
-                        for code in codes:
-                            df_1m, df_5m = pipeline.get_data(code)
-                            # 분석 시작 전 하트비트 로그 (DEBUG)
-                            logger.debug(f"⚙️ [{code}] 전략 분석 엔진 가동 중...")
-                            if strategy.analyze(code, df_1m, df_5m):
-                                # 매수 실행 (내부적으로 Throttler 큐를 사용하므로 스레드 안전)
-                                execution_manager.execute_buy(code, pipeline)
-                    except Exception as e:
-                        logger.error(f"⚠️ [전략 분석 스레드] 예외 발생: {e}")
-                    finally:
-                        is_analyzing = False
+                    def background_analysis():
+                        nonlocal is_analyzing
+                        is_analyzing = True
+                        try:
+                            with pipeline.lock:
+                                codes = list(pipeline.data_1m.keys())
+                            
+                            for code in codes:
+                                df_1m, df_5m = pipeline.get_data(code)
+                                # 분석 시작 전 하트비트 로그 (DEBUG)
+                                logger.debug(f"⚙️ [{code}] 전략 분석 엔진 가동 중...")
+                                if strategy.analyze(code, df_1m, df_5m):
+                                    # 매수 실행 (내부적으로 Throttler 큐를 사용하므로 스레드 안전)
+                                    execution_manager.execute_buy(code, pipeline)
+                        except Exception as e:
+                            logger.error(f"⚠️ [전략 분석 스레드] 예외 발생: {e}")
+                        finally:
+                            is_analyzing = False
 
-                # 백그라운드 워커에게 전체 종목 분석 작업 할당
-                executor_pool.submit(background_analysis)
+                    # 백그라운드 워커에게 전체 종목 분석 작업 할당
+                    executor_pool.submit(background_analysis)
+            except Exception as e:
+                logger.error(f"🔥 [메인 감시 루프 치명적 에러] {e}", exc_info=True)
                     
         timer = QTimer()
         timer.timeout.connect(evaluate_strategy_and_positions)

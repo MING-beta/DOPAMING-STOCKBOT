@@ -5,6 +5,7 @@ StefanoStrategy 모듈
 1. 거시적 타임프레임(5분봉)에서 하락 다이버전스가 발생하는지 (가격은 하락하나 RSI는 상승) 검증합니다.
 2. 거시적 다이버전스가 감지된 상태에서 미시적 타임프레임(1분봉)의 다이버전스가 이중으로 감지되면 매수 시그널을 발생시킵니다.
 """
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import logging

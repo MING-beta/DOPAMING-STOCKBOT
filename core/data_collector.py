@@ -6,6 +6,8 @@ DataCollector 모듈 (AI 학습 데이터 수집기)
 일정 시간 후 결과(Label: 1=성공/0=실패)를 자동으로 업데이트합니다.
 
 이 데이터는 ai_engine.py 가 매일 모델을 재학습하는 데 사용됩니다.
+
+[최적화] update_labels()는 매 틱이 아닌 30초에 1번만 DB I/O 발생
 """
 
 import sqlite3
@@ -13,6 +15,7 @@ import threading
 import queue
 import logging
 import os
+import time
 from datetime import datetime
 
 DB_PATH = os.getenv("AI_FEATURES_DB", "ai_features.db")
@@ -24,6 +27,9 @@ LABEL_DELAY_MINUTES = int(os.getenv("AI_LABEL_DELAY_MIN", "30"))
 LABEL_WIN_THRESHOLD  = float(os.getenv("TRADE_TARGET_PROFIT", "0.04"))
 # 실패 기준 손실률 (예: -0.02 = -2%)
 LABEL_LOSE_THRESHOLD = float(os.getenv("TRADE_STOP_LOSS", "-0.02"))
+
+# [최적화] update_labels()의 DB I/O 최소화: 종목당 최소 이 시간(초)에 한 번만 실제 쿼리 실행
+LABEL_UPDATE_INTERVAL = 30.0
 
 
 class DataCollector:
@@ -42,12 +48,15 @@ class DataCollector:
         self.logger = logging.getLogger("DopamingBot.DataCollector")
         self._write_queue = queue.Queue()
         self._lock = threading.Lock()
+        # [최적화] 종목별 마지막 DB I/O 시각 기록 (30초 배치 방어)
+        self._last_label_time: dict[str, float] = {}
         self._init_db()
 
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._running = True
         self._worker.start()
-        self.logger.info("AI DataCollector 시작 완료 (DB: %s)", DB_PATH)
+        self.logger.info("AI DataCollector 시작 완료 (DB: %s) | 라벨 배치 간격: %.0fs",
+                         DB_PATH, LABEL_UPDATE_INTERVAL)
 
     # ------------------------------------------------------------------
     # DB 초기화
@@ -117,13 +126,21 @@ class DataCollector:
 
     def update_labels(self, code: str, current_price: float):
         """
-        매 실시간 틱마다 호출하여 미결(label=NULL) 레코드의 결과를 업데이트합니다.
-        목표 수익률 또는 손절 기준에 먼저 도달하면 라벨을 확정합니다.
+        매 실시간 틱마다 호출되지만, 실제 DB I/O는 LABEL_UPDATE_INTERVAL(30초)에
+        한 번만 발생하도록 시간 기반 배치 처리합니다.
 
         Args:
             code (str): 종목 코드
             current_price (float): 현재 체결가
         """
+        now = time.monotonic()
+        last = self._last_label_time.get(code, 0.0)
+
+        # [핵심 최적화] 마지막 DB I/O 이후 30초가 지나지 않았으면 큐에 넣지 않음
+        if now - last < LABEL_UPDATE_INTERVAL:
+            return
+
+        self._last_label_time[code] = now
         self._write_queue.put(("LABEL", {"code": code, "current_price": current_price}))
 
     def stop(self):

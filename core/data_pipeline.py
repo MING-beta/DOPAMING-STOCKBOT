@@ -29,6 +29,9 @@ class DataPipeline:
         self.data_5m = {}
         self.reference_prices = {}
         self.day_stats = {} # {code: {'high': 0, 'low': 0, 'volume': 0}}
+
+        # [최적화] 5분봉 resample은 분(minute)이 바뀔 때만 실행 — 틱마다 실행 않음
+        self._last_resample_minute = {}  # {code: int}
         
         # 데이터 접근 시 Thread-Safety 보장을 위한 Lock
         self.lock = threading.Lock()
@@ -138,15 +141,18 @@ class DataPipeline:
                             'volume': tick['volume']
                         }
                     
-                    # 2. 1분봉 기반으로 5분봉 resample 연산
-                    # x분 단위 리샘플링은 pandas resample 활용
-                    self.data_5m[code] = self.data_1m[code].resample('5T').agg({
-                        'open': 'first',
-                        'high': 'max',
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
-                    }).dropna()
+                    # 2. [최적화] 분(Minute)이 바뀔 때만 5분봉 resample 연산 수행
+                    # 동일 분 내 수십 번의 틱이 들어와도 resample은 딱 1번만 실행됨
+                    current_minute = minute_index.minute
+                    if self._last_resample_minute.get(code) != current_minute:
+                        self.data_5m[code] = self.data_1m[code].resample('5T').agg({
+                            'open': 'first',
+                            'high': 'max',
+                            'low': 'min',
+                            'close': 'last',
+                            'volume': 'sum'
+                        }).dropna()
+                        self._last_resample_minute[code] = current_minute
 
                     # 3. [최적화] 실시간 지표 연산 수행 (백그라운드 스레드)
                     if self.indicator_callback:

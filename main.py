@@ -159,7 +159,7 @@ def main():
                     
         timer = QTimer()
         timer.timeout.connect(evaluate_strategy_and_positions)
-        timer.start(500) # [초저지연 최적화] 0.5초 주기로 기민하게 감시
+        timer.start(1000) # [성능 최적화] 1초 주기 (키움 틱 지연 200~300ms 감안 시 충분한 반응속도)
 
 
         # 13. 슬랙 푸시 알림: 시작, 종료 및 헬스체크 설정

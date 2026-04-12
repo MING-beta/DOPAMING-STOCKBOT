@@ -21,6 +21,8 @@ from ui.dashboard import Dashboard
 from utils.report_generator import ReportGenerator
 from PyQt5.QtCore import QTimer
 from concurrent.futures import ThreadPoolExecutor
+from core.data_collector import DataCollector
+from core.ai_engine import AIEngine
 
 def main():
     """
@@ -78,6 +80,15 @@ def main():
         # 8. 전략 엔진 초기화 및 지표 연산 등록 (백그라운드 최적화)
         strategy = StefanoStrategy()
         pipeline.register_indicator_callback(strategy._calculate_indicators)
+
+        # 8-1. [AI 모듈] 데이터 수집기 + AI 추론 엔진 초기화 후 전략에 주입
+        data_collector = DataCollector()
+        ai_engine      = AIEngine()
+        strategy.set_ai_modules(ai_engine, data_collector)
+        # GC 방지를 위해 최상위 객체(kiwoom)에 앵커링
+        kiwoom._ai_engine_anchor      = ai_engine
+        kiwoom._data_collector_anchor = data_collector
+        logger.info("🤖 AI 모듈 초기화 완료: DataCollector + AIEngine → Strategy 주입")
 
         # 9. GUI 대시보드 화면 생성 & 로깅 신호 연결
         dashboard = Dashboard(kiwoom, pipeline, execution_manager, strategy)
@@ -227,6 +238,10 @@ def main():
                 logger.info("장 종료 고도화 리포트 발송")
                 slack.send_message(report_msg)
                 notification_flags["market_close"] = True
+
+                # [AI 재학습] 장 종료 후 당일 데이터를 학습하여 모델 자동 업데이트
+                logger.info("🤖 AI 모델 일일 재학습 시작 (백그라운드)...")
+                ai_engine.train_model()
                 
             # 자정(00:00)에 다음날을 위해 플래그 초기화
             elif now_str == "00:00":

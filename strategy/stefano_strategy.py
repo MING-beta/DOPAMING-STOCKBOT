@@ -10,6 +10,14 @@ import numpy as np
 import logging
 import os
 
+# AI 모듈 (선택적 의존성 — 주입(Injection) 방식으로 사용)
+try:
+    from core.data_collector import DataCollector
+    from core.ai_engine import AIEngine
+except ImportError:
+    DataCollector = None
+    AIEngine = None
+
 def _find_valleys(arr, distance=3):
     """
     scipy.signal.find_peaks를 대체하기 위한 가벼운 로컬 저점(Valley) 탐색 함수입니다.
@@ -50,6 +58,71 @@ class StefanoStrategy:
         # 거래 체결 테스트 모드 플래그 (AND -> OR 조건으로 매수 빈도 폭증)
         self.is_extreme_test = os.getenv("EXTREME_TEST_MODE", "False").lower() == 'true'
 
+        # AI 모듈 (main.py에서 set_ai_modules()로 주입)
+        self.ai_engine:       "AIEngine"      = None
+        self.data_collector:  "DataCollector" = None
+
+    def set_ai_modules(self, ai_engine, data_collector):
+        """main.py에서 AI 엔진과 데이터 수집기를 주입합니다."""
+        self.ai_engine      = ai_engine
+        self.data_collector = data_collector
+        self.logger.info("✅ AI 모듈 연결 완료 (AIEngine + DataCollector)")
+
+    # ------------------------------------------------------------------
+    # AI Feature 추출 헬퍼
+    # ------------------------------------------------------------------
+    def _extract_ai_features(self, code, df_1m: pd.DataFrame, df_5m: pd.DataFrame,
+                              macro_div: bool, micro_div: bool) -> dict:
+        """AI 모델에 전달할 Feature 딕셔너리를 계산합니다."""
+        try:
+            last_price = df_1m['close'].iloc[-1]
+
+            # RSI
+            rsi_1m = float(df_1m['RSI'].iloc[-1])   if 'RSI'      in df_1m.columns else 50.0
+            rsi_5m = float(df_5m['RSI'].iloc[-1])   if 'RSI'      in df_5m.columns else 50.0
+
+            # BB 하단 이격도 (현재가 - BB하단) / BB하단
+            if 'BB_Lower' in df_1m.columns and df_1m['BB_Lower'].iloc[-1] > 0:
+                bb_pct_1m = (last_price - df_1m['BB_Lower'].iloc[-1]) / df_1m['BB_Lower'].iloc[-1]
+            else:
+                bb_pct_1m = 0.0
+
+            if 'BB_Lower' in df_5m.columns and df_5m['BB_Lower'].iloc[-1] > 0:
+                bb_pct_5m = (df_5m['close'].iloc[-1] - df_5m['BB_Lower'].iloc[-1]) / df_5m['BB_Lower'].iloc[-1]
+            else:
+                bb_pct_5m = 0.0
+
+            # 거래량 비율 (현재봉 / 20봉 평균)
+            vol_mean = df_1m['volume'].iloc[-20:].mean()
+            vol_ratio = float(df_1m['volume'].iloc[-1] / vol_mean) if vol_mean > 0 else 1.0
+
+            # 가격 변화율
+            price_chg_5  = float((last_price - df_1m['close'].iloc[-6])  / df_1m['close'].iloc[-6])  if len(df_1m) >= 6  else 0.0
+            price_chg_20 = float((last_price - df_1m['close'].iloc[-21]) / df_1m['close'].iloc[-21]) if len(df_1m) >= 21 else 0.0
+
+            return {
+                "rsi_1m":       rsi_1m,
+                "rsi_5m":       rsi_5m,
+                "bb_pct_1m":    round(bb_pct_1m, 6),
+                "bb_pct_5m":    round(bb_pct_5m, 6),
+                "vol_ratio":    round(vol_ratio, 4),
+                "price_chg_5":  round(price_chg_5,  6),
+                "price_chg_20": round(price_chg_20, 6),
+                "macro_div":    int(macro_div),
+                "micro_div":    int(micro_div),
+                "is_aggressive": int(self.is_aggressive),
+            }
+        except Exception as e:
+            self.logger.debug("[%s] Feature 추출 오류 (기본값 사용): %s", code, e)
+            return {col: 0.0 for col in [
+                "rsi_1m","rsi_5m","bb_pct_1m","bb_pct_5m",
+                "vol_ratio","price_chg_5","price_chg_20",
+                "macro_div","micro_div","is_aggressive"
+            ]}
+
+    # ------------------------------------------------------------------
+    # 핵심 분석 엔진
+    # ------------------------------------------------------------------
     def analyze(self, code, df_1m: pd.DataFrame, df_5m: pd.DataFrame):
         if df_1m.empty or df_5m.empty:
             return False
@@ -64,6 +137,11 @@ class StefanoStrategy:
         # 2. 5분봉(거시적) 다이버전스 감지
         macro_div = self._check_bullish_divergence(df_5m, window=self.check_window)
         current_time = df_5m.index[-1]
+        last_price   = df_1m['close'].iloc[-1]
+
+        # [AI 라벨 업데이트] 실시간 틱마다 미결 신호의 결과를 추적
+        if self.data_collector:
+            self.data_collector.update_labels(code, last_price)
 
         # [최적화] 거시 신호가 감지되면 진입 대기 상태로 전환
         if macro_div:
@@ -71,6 +149,12 @@ class StefanoStrategy:
                 self.macro_states[code] = True
                 self._indicator_cache[f"{code}_macro_time"] = current_time
                 self.logger.info(f"[{code}] 5분봉 상승 다이버전스 감지! 진입 State 활성화.")
+
+                # [AI 데이터 수집] 거시 신호 발생 순간의 Feature 캡쳐
+                if self.data_collector:
+                    micro_now = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
+                    features  = self._extract_ai_features(code, df_1m, df_5m, macro_div=True, micro_div=micro_now)
+                    self.data_collector.capture_signal(code, features, last_price)
         else:
             # [전체 검수 보강] 매수 대기 상태(macro_states) 자동 만료(Reset) 로직
             if self.macro_states.get(code, False):
@@ -88,11 +172,10 @@ class StefanoStrategy:
 
         # [테스트 모드: 모든 지표 상시 연산 및 OR 조건 매수]
         if getattr(self, 'is_extreme_test', False):
-            micro_div = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
-            last_price = df_1m['close'].iloc[-1]
-            bb_lower = df_1m['BB_Lower'].iloc[-1]
+            micro_div  = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
+            bb_lower   = df_1m['BB_Lower'].iloc[-1]
             bb_multiplier = 1.05 if getattr(self, 'is_aggressive', False) else 1.02
-            bb_touch = (last_price <= bb_lower * bb_multiplier)
+            bb_touch   = (last_price <= bb_lower * bb_multiplier)
             
             if macro_div or micro_div or bb_touch:
                 self.logger.warning(f"[{code}] 🧪 [체결 테스트 모드] OR 조건 충족 (5m={macro_div}, 1m={micro_div}, bb={bb_touch}) -> 조건 무시 매수 발동!")
@@ -115,7 +198,27 @@ class StefanoStrategy:
             
             if micro_div:
                 if last_price <= bb_lower * bb_multiplier:  
-                    self.logger.warning(f"[{code}] 💥 1분봉 이중 다이버전스 + BB 하단 통과! 매수 실행!")
+                    # ── AI 최종 승인 게이트 ─────────────────────────────────
+                    if self.ai_engine:
+                        features = self._extract_ai_features(
+                            code, df_1m, df_5m,
+                            macro_div=self.macro_states.get(code, False),
+                            micro_div=True
+                        )
+                        approved, prob = self.ai_engine.approve(features)
+                        prob_str = f"{prob*100:.1f}%" if prob >= 0 else "N/A(모델없음)"
+                        if not approved:
+                            self.logger.info(
+                                f"[{code}] 🛑 AI 기각 (확률: {prob_str}) → 이번 타점 패스"
+                            )
+                            return False
+                        self.logger.warning(
+                            f"[{code}] 💥 1분봉 이중 다이버전스 + BB 하단 통과! "
+                            f"AI 승인 ({prob_str}) → 매수 실행!"
+                        )
+                    else:
+                        self.logger.warning(f"[{code}] 💥 1분봉 이중 다이버전스 + BB 하단 통과! 매수 실행!")
+                    # ────────────────────────────────────────────────────────
                     self.macro_states[code] = False
                     return True
                 else:

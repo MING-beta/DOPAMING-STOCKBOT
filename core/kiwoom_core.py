@@ -37,6 +37,7 @@ class KiwoomCore(QAxWidget):
         self.execution_manager = None
         self.available_cash = 0
         self.reserved_cash = 0  # [시스템 보호] 주문 중인 가상 예약금 (중복 매수 방지)
+        self.official_daily_pnl = 0  # [신규모듈] 서버 공식 일일 실현손익
         self._condition_loaded = False
         self.login_event_loop = None
         # 현재 실시간 감시 중인 종목 데이터: { 종목코드: 감시시작타임스탬프 }
@@ -164,6 +165,21 @@ class KiwoomCore(QAxWidget):
         self.throttler.put({"type": "opw00001", "account": acc_no, "password": password})
         self.throttler.put({"type": "opw00018", "account": acc_no, "password": password})
         self.logger.debug(f"[스로틀링 큐 적재] 계좌 동기화 요청 (acc={acc_no})")
+
+    def request_daily_pnl(self):
+        """오늘 하루 실현손익 내역 조회를 Throttler를 통해 지시합니다."""
+        from datetime import datetime
+        acc_list = self.get_account_list()
+        if not acc_list: return
+        acc_no = acc_list[0]
+        today = datetime.now().strftime("%Y%m%d")
+        self.throttler.put({
+            "type": "opt10074",
+            "account": acc_no,
+            "start_date": today,
+            "end_date": today
+        })
+        self.logger.debug(f"[스로틀링 큐 적재] 당일 실현손익(opt10074) 요청: {today}")
 
     def request_opt10080(self, code):
         """1분봉 차트 조회를 Throttler를 통해 지시하며, 기준가(전일종가)를 동기화합니다."""

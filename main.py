@@ -105,6 +105,17 @@ def main():
         # 11. 계좌 동기화 통신 시작 (동기화 완료 응답 시 자동으로 get_condition_load 호출 연계됨)
         logger.info("내 계좌 예수금 및 잔고 동기화 절차 시작...")
         kiwoom.request_account_info(account_password)
+        kiwoom.request_daily_pnl() # [추가] 오늘 전체 실현손익 서버 동기화
+        
+        # 🔔 [보유 종목 초기 동기화] DB에서 로드된 기존 보유 종목들에 대해 실시간 데이터 및 차트 등록
+        existing_positions = list(execution_manager.positions.keys())
+        if existing_positions:
+            logger.info(f"기본 보유 종목({len(existing_positions)}건) 실시간 및 과거 데이터 등록 시작...")
+            # 실시간 수신 등록 (FID: 10-현재가, 15-거래량, 20-체결시간)
+            kiwoom.set_real_reg("1000", existing_positions, "10;15;20", "1")
+            for code in existing_positions:
+                kiwoom.request_opt10080(code)
+                logger.debug(f"[{code}] 보유 종목 실시간/차트 싱크 등록 완료")
         
         # 11-1. 폴백(Fallback) 타이머: 15초 후에도 조건검색 로드가 안 됐다면 강제 실행
         # (계좌 비밀번호 미등록 등으로 opw00018 응답이 없을 때를 대비)
@@ -160,6 +171,27 @@ def main():
         timer = QTimer()
         timer.timeout.connect(evaluate_strategy_and_positions)
         timer.start(1000) # [성능 최적화] 1초 주기 (키움 틱 지연 200~300ms 감안 시 충분한 반응속도)
+
+        # (4) [데이터 보정] 과거 차트 누락 종목 자동 재동기화 (2분 주기)
+        def repair_data_continuity():
+            if execution_manager.is_risk_halt: return
+            
+            with pipeline.lock:
+                # 현재 파이프라인에 등록된 모든 종목 체크
+                codes = list(pipeline.data_1m.keys())
+            
+            for code in codes:
+                df_1m, _ = pipeline.get_data(code)
+                # 데이터가 100개 미만이면 과거 차트(900개) 동기화가 실패한 것으로 간주하여 재요청
+                # (1~2분 정도 흘러도 캔들이 100개가 될 수 없으므로 확실한 누락 징후)
+                if not df_1m.empty and len(df_1m) < 100:
+                    logger.warning(f"🔍 [데이터 복구] {code} 종목의 과거 차트 누락 또는 부족 감지 ({len(df_1m)}개) -> 재동기화 요청")
+                    kiwoom.request_opt10080(code)
+        
+        repair_timer = QTimer()
+        repair_timer.timeout.connect(repair_data_continuity)
+        repair_timer.start(120000) # 2분(120,000ms)마다 스캔
+        kiwoom._repair_timer = repair_timer
 
 
         # 13. 슬랙 푸시 알림: 시작, 종료 및 헬스체크 설정
@@ -228,6 +260,13 @@ def main():
                     name = kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
                     code_map[code] = name.strip() if hasattr(name, 'strip') else code
                 
+                # [고도화] 서버 공식 실현손익 데이터 반영
+                if kiwoom.official_daily_pnl != 0:
+                    summary['realized_pnl'] = kiwoom.official_daily_pnl
+                    self.logger.info(f"✅ 리포트 생성 시 서버 공식 수익금({kiwoom.official_daily_pnl:,}원)을 적용합니다.")
+                else:
+                    self.logger.warning("⚠️ 서버 공식 실현손익 데이터가 없어 DB 추정치를 사용합니다.")
+
                 # 리포트 생성
                 report_msg = ReportGenerator.generate_markdown_report(
                     summary, 

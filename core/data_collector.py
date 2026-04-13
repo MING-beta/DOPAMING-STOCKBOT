@@ -195,17 +195,23 @@ class DataCollector:
 
             updates = []
             for row_id, entry_price, captured_at in rows:
-                if entry_price <= 0:
+                # [수정] DB에서 가져온 값이 bytes일 경우를 대비해 int로 강제 변환
+                try:
+                    entry_price = float(entry_price)
+                    current_price = float(current_price)
+                except (ValueError, TypeError):
                     continue
 
-                pct = (current_price - entry_price) / entry_price
+                # [수정] 실질 수익률 계산 (제비용 약 0.25% 차감)
+                gross_pct = (current_price - entry_price) / entry_price
+                net_pct = gross_pct - 0.0025
 
                 # 익절 조건 달성 → 성공(1)
-                if pct >= LABEL_WIN_THRESHOLD:
-                    updates.append((1, now_iso, current_price, round(pct * 100, 2), row_id))
+                if net_pct >= LABEL_WIN_THRESHOLD:
+                    updates.append((1, now_iso, current_price, round(net_pct * 100, 2), row_id))
                 # 손절 조건 달성 → 실패(0)
-                elif pct <= LABEL_LOSE_THRESHOLD:
-                    updates.append((0, now_iso, current_price, round(pct * 100, 2), row_id))
+                elif net_pct <= LABEL_LOSE_THRESHOLD:
+                    updates.append((0, now_iso, current_price, round(net_pct * 100, 2), row_id))
 
             if updates:
                 conn.executemany("""

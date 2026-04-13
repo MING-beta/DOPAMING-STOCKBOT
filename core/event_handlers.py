@@ -85,7 +85,8 @@ class EventHandler:
             # [Hysteresis] 유예 목록에 있다면 즉시 복구 (삭제 예약 취소)
             if strCode in self.pending_removals:
                 del self.pending_removals[strCode]
-                self.logger.info(f"🔄 [유예 복구] {strCode} - 30초 이내 재편입되어 기존 데이터를 유지하고 분석을 계속합니다.")
+                grace_period = int(os.getenv("MONITORING_GRACE_PERIOD", "300"))
+                self.logger.info(f"🔄 [유예 복구] {strCode} - {grace_period}초 이내 재편입되어 기존 데이터를 유지하고 분석을 계속합니다.")
                 return
 
             if strCode in self.kc.monitored_codes:
@@ -131,20 +132,22 @@ class EventHandler:
             if strCode in self.kc.monitored_codes:
                 # [Hysteresis] 즉시 삭제하지 않고 유예 리스트에 등록
                 self.pending_removals[strCode] = time.time()
-                self.logger.info(f"⏳ [이탈 유예] {strCode} - 조건식에서 이탈했으나 30초간 데이터를 유지하며 추격합니다.")
+                grace_period = int(os.getenv("MONITORING_GRACE_PERIOD", "300"))
+                self.logger.info(f"⏳ [이탈 유예] {strCode} - 조건식에서 이탈했으나 {grace_period}초간 데이터를 유지하며 추격합니다.")
             else:
                 self.logger.debug(f"[실시간 조건 이탈] {strCode} - 감시 목록에 없음, 무시")
 
     def _cleanup_pending_removals(self):
-        """30초 이상 조건식으로 돌아오지 않은 종목들을 시스템에서 완전히 제거합니다."""
+        """특정 시간 이상 조건식으로 돌아오지 않은 종목들을 시스템에서 완전히 제거합니다."""
         now = time.time()
-        to_delete = [code for code, exit_time in self.pending_removals.items() if now - exit_time >= 30]
+        grace_period = int(os.getenv("MONITORING_GRACE_PERIOD", "300"))
+        to_delete = [code for code, exit_time in self.pending_removals.items() if now - exit_time >= grace_period]
         
         for code in to_delete:
             del self.pending_removals[code]
             if code in self.kc.monitored_codes:
                 del self.kc.monitored_codes[code]
-                self.logger.warning(f"🗑️ [최종 제거] {code} - 유예 시간(30초) 초과로 감시를 종료합니다.")
+                self.logger.warning(f"🗑️ [최종 제거] {code} - 유예 시간({grace_period}초) 초과로 감시를 종료합니다.")
                 
                 # 실시간 수신 해제 및 파이프라인 데이터 삭제
                 self.kc.set_real_remove("1000", code)
@@ -193,7 +196,7 @@ class EventHandler:
         try:
             # 상태 변수 모두 추출
             order_no = self.kc.dynamicCall("GetChejanData(int)", 9203).strip()
-            code = self.kc.dynamicCall("GetChejanData(int)", 9001).strip(" A")
+            code = self.kc.dynamicCall("GetChejanData(int)", 9001).replace("A", "").strip()
             order_status = self.kc.dynamicCall("GetChejanData(int)", 913).strip()
             order_type_str = self.kc.dynamicCall("GetChejanData(int)", 905).strip() # '+매수', '-매도'
             
@@ -220,13 +223,24 @@ class EventHandler:
                 # 잔고 변경의 경우 보유수량(930), 매입단가(931) 등의 정보를 받아 즉시 자산을 동기화
                 pos_qty_str = self.kc.dynamicCall("GetChejanData(int)", 930).replace(',', '').strip()
                 pos_price_str = self.kc.dynamicCall("GetChejanData(int)", 931).replace(',', '').strip()
+                
                 self.logger.info(f"💼 [Chejan 잔고 변경] 종목: {code} | 현재보유수량: {pos_qty_str} | 매입단가: {pos_price_str}")
+                
+                # API 공식 밸런스 데이터를 ExecutionManager에 즉시 동기화 (간결하고 정확함)
+                if self.kc.execution_manager:
+                    try:
+                        qty = int(pos_qty_str) if pos_qty_str else 0
+                        avg_price = float(pos_price_str) if pos_price_str else 0.0
+                        self.kc.execution_manager.sync_single_position(code, qty, avg_price)
+                    except ValueError:
+                        self.logger.error(f"❌ [Chejan 동기화 오류] 수량/가각 변환 실패 ({code})")
                 
         except Exception as e:
             self.logger.error(f"❌ [Chejan 수신 에러] 구조적 결함 발생: {e}")
 
     def on_receive_tr_data(self, sScrNo, sRQName, sTrCode, sRecordName, sPrevNext, nDataLength, sErrorCode, sMessage, sSplmMsg):
         """특정 TR 단위 데이터(계좌, 과거 분봉 차트 등) 수신 및 파싱 처리"""
+        self.logger.critical(f"📥 TR 수신: {sRQName}")
         
         # 1. 예수금 조회 TR 응답 처리
         if sRQName == "opw00001_req":
@@ -244,44 +258,82 @@ class EventHandler:
             
         # 2. 계좌 잔고 조회 TR 응답 처리
         elif sRQName == "opw00018_req":
-            # [추가] 총 자산 파싱 (단일 데이터)
-            # 모의투자/실전투자에 따라 필드명이 다를 수 있으므로 순차적 시도
-            target_fields = ["추정평가자산", "자산현황", "총평가금액"]
-            total_assets = 0
+            # [최종 해결] 불확실한 API 요약 필드 대신, 현금과 각 종목 평가액을 직접 합산함
+            total_stock_eval = 0
             
-            for field in target_fields:
-                val = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, 0, field).strip()
-                if val and int(val) > 0:
-                    total_assets = int(val)
-                    self.logger.debug(f"계좌 자산 파싱 성공: {field}={total_assets}")
-                    break
-                
-            if total_assets > 0:
-                # 더 정확한 자산 정보(주식 평가액 포함)가 오면 업데이트
-                self.kc.initial_total_assets = total_assets
-                self.kc.reserved_cash = 0 # [동기화] 자산 갱신 시 예약금 초기화
-                self.logger.info(f"💎 [자산 동기화 완료] 실시간 총 자산: {total_assets:,} 원 (리스크 기준점)")
+            # (A) 먼저 싱글 데이터에서 '평가금액합계' 혹은 '평가금액'을 시도 (보조적 확인용)
+            summary_eval = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, 0, "평가금액").strip()
+            summary_eval_int = int(summary_eval) if summary_eval and summary_eval.isdigit() else 0
 
             data_cnt = self.kc.dynamicCall("GetRepeatCnt(QString, QString)", sTrCode, sRQName)
             server_pos = {}
             for i in range(data_cnt):
                 code_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "종목번호").strip()
                 if code_str.startswith("A"): code_str = code_str[1:]
+                code_str = code_str.strip()
                 qty_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "보유수량").strip()
                 price_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "매입가").strip()
+                cur_price_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "현재가").strip()
+                profit_rate_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "수익률(%)").strip()
+                pnl_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "평가손익").strip()
+                
+                # [핵심] 개별 종목의 평가금액 파싱 및 합산
+                eval_amount_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "평가금액").strip()
+                eval_amount = int(eval_amount_str) if eval_amount_str and eval_amount_str.isdigit() else 0
+                total_stock_eval += eval_amount
                 
                 if qty_str and price_str:
                     qty = int(qty_str)
                     price = int(price_str)
+                    cur_price = abs(int(cur_price_str)) if cur_price_str else price
+                    
+                    try:
+                        api_profit_rate = float(profit_rate_str) if profit_rate_str else 0.0
+                        api_pnl = int(pnl_str) if pnl_str else 0
+                    except ValueError:
+                        api_profit_rate = 0.0
+                        api_pnl = 0
+
                     if qty > 0:
-                        server_pos[code_str] = {'buy_price': price, 'qty': qty}
+                        server_pos[code_str] = {
+                            'buy_price': price, 'qty': qty, 'current_price': cur_price,
+                            'api_profit_rate': api_profit_rate, 'api_pnl': api_pnl
+                        }
+            
+            # (B) 최종 자산 재구성: 가용 현금(opw00001 기반) + 계산된 주식 평가 합계
+            # 만약 직접 합산한 값이 요약 데이터보다 크면 직접 합산값 사용 (안전벨트)
+            final_stock_val = max(summary_eval_int, total_stock_eval)
+            total_assets = self.kc.available_cash + final_stock_val
+            
+            if total_assets > 10000: # 최소 1만원 이상일 때만 유효 조치
+                self.kc.initial_total_assets = total_assets
+                self.kc.reserved_cash = 0
+                self.logger.info(f"💎 [자산 재구성 완료] 총자산: {total_assets:,} 원 (현금:{self.kc.available_cash:,} + 주식합계:{final_stock_val:,})")
             
             # 서버에서 받은 실제 실시간 잔고를 매니저에 덮어씌움
             if self.kc.execution_manager:
                 self.kc.execution_manager.sync_server_positions(server_pos)
                 
+                # 🔔 [실시간 보강] 서버에서 확인된 전 종목을 실시간 수신 대상으로 다시 등록
+                if server_pos:
+                    codes = list(server_pos.keys())
+                    self.kc.set_real_reg("1000", codes, "10;15;20", "1")
+                    self.logger.info(f"💼 [보유 종목 실시간 연동] {len(codes)}개 종목 실시간 수신 등록 완료")
+                
             # 계좌 연동이 모두 끝났으므로 조건식 로드 킥오프
             self.kc.get_condition_load()
+            return
+
+        # 2-1. 당일 실현손익 조회 TR 응답 처리 (서버 공식 데이터)
+        elif sRQName == "opt10074_req":
+            pnl_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, 0, "실현손익").strip()
+            if pnl_str:
+                try:
+                    official_pnl = int(pnl_str)
+                    self.kc.official_daily_pnl = official_pnl # 공식 손익 저장
+                    self.logger.info(f"📊 [공식 수익 동기화] 오늘 실현 손익: {official_pnl:,} 원")
+                except ValueError:
+                    self.logger.error("❌ [공식 수익 동기화 오류] 숫자 변환 실패")
             return
             
         # 3. 주식 분봉 차트 조회 TR 응답 처리

@@ -55,8 +55,10 @@ class StefanoStrategy:
         # 공격적 매매 플래그 (타점 완화용)
         self.is_aggressive = os.getenv("AGGRESSIVE_MODE", "False").lower() == 'true'
         
-        # 거래 체결 테스트 모드 플래그 (AND -> OR 조건으로 매수 빈도 폭증)
-        self.is_extreme_test = os.getenv("EXTREME_TEST_MODE", "False").lower() == 'true'
+        # 거시 신호(5분봉) 무시 플래그 (타점 폭주용)
+        self.bypass_macro = os.getenv("STRATEGY_BYPASS_MACRO", "False").lower() == 'true'
+        if self.bypass_macro:
+            self.logger.warning("🚀 [전략 설정] 거시(5분봉) 필터 우회 모드 활성화 - 1분봉 신호로 즉시 매수합니다.")
 
         # AI 모듈 (main.py에서 set_ai_modules()로 주입)
         self.ai_engine:       "AIEngine"      = None
@@ -127,15 +129,18 @@ class StefanoStrategy:
         if df_1m.empty or df_5m.empty:
             return False
             
-        if len(df_1m) < 20 or len(df_5m) < 20:
+        # 5분봉 데이터가 부족해도 분석 가능하도록 완화 (거시 필터 우회 시)
+        min_5m_len = 5 if self.bypass_macro else 20
+        if len(df_1m) < 20 or len(df_5m) < min_5m_len:
+            self.logger.info(f"[{code}] 데이터 수집 중... (1m: {len(df_1m)}개, 5m: {len(df_5m)}개)")
             return False
 
         # 1. 보조지표 계산 (캐싱 적용된 고속 버전)
         df_1m = self._get_cached_indicators(code, "1m", df_1m)
         df_5m = self._get_cached_indicators(code, "5m", df_5m)
 
-        # 2. 5분봉(거시적) 다이버전스 감지
-        macro_div = self._check_bullish_divergence(df_5m, window=self.check_window)
+        # 2. 5분봉(거시적) 다이버전스 감지 (우회 모드 시 무조건 True)
+        macro_div = True if self.bypass_macro else self._check_bullish_divergence(df_5m, window=self.check_window)
         current_time = df_5m.index[-1]
         last_price   = df_1m['close'].iloc[-1]
 
@@ -161,13 +166,14 @@ class StefanoStrategy:
                 entry_time = self._indicator_cache.get(f"{code}_macro_time")
                 
                 # A. 시간 만료: 5분봉 기준 6봉(30분)이 지났는데도 1분봉 타점이 안오면 신호 소멸로 간주
-                # B. 추세 회복: 5분봉 RSI가 50(균형점)을 넘어서면 이미 반등이 끝난 것으로 보고 리셋
+                # B. 추세 회복: 5분봉 RSI가 특정값(기본 50)을 넘어서면 이미 반등이 끝난 것으로 보고 리셋
                 rsi_5m = df_5m['RSI'].iloc[-1]
                 time_diff = (current_time - entry_time).total_seconds() / 60 if entry_time else 0
                 
-                if time_diff > 30 or rsi_5m > 50:
+                rsi_exit_limit = int(os.getenv("STRATEGY_MACRO_RSI_EXIT", "50"))
+                if time_diff > 30 or rsi_5m > rsi_exit_limit:
                     self.macro_states[code] = False
-                    reason = "시간 경과(30분)" if time_diff > 30 else "추세 회복(RSI > 50)"
+                    reason = "시간 경과(30분)" if time_diff > 30 else f"추세 회복(RSI > {rsi_exit_limit})"
                     self.logger.info(f"[{code}] 거시 신호가 유효하지 않아 {reason}로 대기 상태를 해제(Reset)합니다.")
 
         # [테스트 모드: 모든 지표 상시 연산 및 OR 조건 매수]
@@ -193,8 +199,8 @@ class StefanoStrategy:
             self.logger.info(f"[{code}] 🔎 대기중... RSI(1m)={rsi_1m:.1f}, 현재가={last_price:,}, BB하단={bb_lower:.1f}")
             self.logger.info(f"[{code}] ❓ 매수조건: 1분 다이버전스={micro_div}, BB하단 근접={last_price <= bb_lower * 1.005}")
 
-            # 공격적 모드일 경우 BB 하단에서 5% 상위까지 타점 허용, 일반은 2%
-            bb_multiplier = 1.05 if self.is_aggressive else 1.02
+            # 볼린저 밴드 하단 대비 진입 허용폭 (공격모드 1.05, 일반 1.02)
+            bb_multiplier = float(os.getenv("STRATEGY_BB_GAP", "1.05" if self.is_aggressive else "1.02"))
             
             if micro_div:
                 if last_price <= bb_lower * bb_multiplier:  
@@ -306,8 +312,8 @@ class StefanoStrategy:
             # 주가가 바닥을 친 정확히 '동일한 시점' 의 RSI 지표값을 비교해야 진정한 다이버전스 성립
             rsi_rising = rsis[curr_p_idx] > rsis[prev_p_idx]
             
-            # 공격적 모드일 경우 RSI 과매도 필터 대폭 완화(65), 일반은 45
-            rsi_strict_limit = 65 if getattr(self, 'is_aggressive', False) else 45
+            # 다이버전스 타점 인정 RSI 한도 (공격모드 65, 일반 45)
+            rsi_strict_limit = int(os.getenv("STRATEGY_RSI_LIMIT", "65" if getattr(self, 'is_aggressive', False) else "45"))
             
             if price_falling and rsi_rising:
                 # 추가 필터 (선택적): 이전 저점 형성 시 RSI가 기준점 이하에 있었는가

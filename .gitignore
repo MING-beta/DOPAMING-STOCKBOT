@@ -1,7 +1,7 @@
 # Environments
 venv32/
 venv/
-.env
+#.env
 
 # Cache
 __pycache__/
@@ -9,8 +9,12 @@ __pycache__/
 
 # DB & Logs
 executions.db
+ai_features.db
 logs/
+stderr.log
 
-# IDE
+# IDE & Misc
 .vscode/
 .idea/
+scratch/
+=

@@ -374,11 +374,21 @@ class Dashboard(QMainWindow):
                 elif day_pos_pct <= 80: day_pos_str = f"고점부({day_pos_pct:.0f}%)"
                 else: day_pos_str = f"상단권({day_pos_pct:.0f}%)"
 
-                if code not in self.code_names:
-                    name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
-                    self.code_names[code] = name.strip() if getattr(name, 'strip', None) else ""
-                
-                self.watch_table.setItem(row, 0, QTableWidgetItem(f"{self.code_names[code]} ({code})"))
+                # [복구] 종목명 조회 및 표시 (Column 0)
+                if code not in self.code_names or not self.code_names[code]:
+                    clean_code = code.replace("A", "").strip()
+                    # 0 누락 대응 (안전하게 6자리 패딩)
+                    if len(clean_code) < 6: clean_code = clean_code.zfill(6)
+                    name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", clean_code)
+                    if name and name.strip():
+                        self.code_names[code] = name.strip()
+                    else:
+                        self.code_names[code] = "" # 조회 실패 시 공백 유지 (재시도 유도)
+
+                display_name = self.code_names.get(code, "")
+                name_text = f"{display_name} ({code})" if display_name else f"조회중... ({code})"
+                self.watch_table.setItem(row, 0, QTableWidgetItem(name_text))
+
                 p_text = f"{int(current_price):,} ({change_rate:+.2f}%)" if has_data else "로딩 중..."
                 price_item = QTableWidgetItem(p_text)
                 price_item.setForeground(QColor("#FF8A80" if change_rate > 0 else "#92B9F9" if change_rate < 0 else "#BDC1C6"))
@@ -408,33 +418,54 @@ class Dashboard(QMainWindow):
                 item_status.setForeground(QColor("#8AB4F8" if is_macro else "#5F6368"))
                 self.watch_table.setItem(row, 6, item_status)
 
-            # [5] 포지션 테이블 업데이트
+            # [5] 포지션 테이블 업데이트 (수익률 기준 내림차순 정렬)
             positions = self.execution_manager.positions
-            self.pos_table.setRowCount(len(positions))
-            total_valuation = sum([p['qty'] * (self.pipeline.data_1m[c]['close'].iloc[-1] if c in self.pipeline.data_1m and not self.pipeline.data_1m[c].empty else p['buy_price']) for c, p in positions.items()])
-            total_account_value = (self.kiwoom.available_cash if self.kiwoom.available_cash is not None else 0) + total_valuation
+            
+            # [최적화] 모든 계산에 일관된 '실질 수익률(Net ROI)'을 사용하기 위해 내부 함수 정의
+            def get_net_roi(c, p):
+                if 'api_profit_rate' in p:
+                    # 키움 공식 수익률(제비용 포함) 사용
+                    return p['api_profit_rate']
+                # API 데이터가 없으면 현재가 기반으로 0.25% 차감 추정
+                cp = p.get('current_price', p['buy_price'])
+                if c in self.pipeline.data_1m and not self.pipeline.data_1m[c].empty:
+                    cp = self.pipeline.data_1m[c]['close'].iloc[-1]
+                return ((cp - p['buy_price']) / p['buy_price'] * 100.0) - 0.25
 
-            try:
-                self.cash_value_label.setText(f"{int(total_account_value):,} 원")
-            except:
-                self.cash_value_label.setText("- 원")
+            sorted_positions = sorted(
+                positions.items(),
+                key=lambda x: get_net_roi(x[0], x[1]),
+                reverse=True
+            )
+            # [진단 전용] 정렬 결과 로그 출력 (검증용)
+            sort_audit = [f"{c}:{get_net_roi(c,d):.2f}%" for c, d in sorted_positions]
+            self.kiwoom.logger.debug(f"📊 [포지션 정렬 결과] {' > '.join(sort_audit)}")
 
-            for row, (code, data) in enumerate(positions.items()):
+            self.pos_table.setRowCount(len(sorted_positions))
+            
+            # 자산 요약 업데이트
+            total_account_value = self.kiwoom.initial_total_assets
+            self.cash_value_label.setText(f"{int(total_account_value):,} 원" if total_account_value > 0 else "- 원")
+
+            for row, (code, data) in enumerate(sorted_positions):
                 if code not in self.code_names:
-                    name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
+                    clean_code = code.replace("A", "").strip().zfill(6)
+                    name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", clean_code)
                     self.code_names[code] = name.strip() if getattr(name, 'strip', None) else code
 
-                cur_p = data['buy_price']
-                ref_p = self.pipeline.reference_prices.get(code, data['buy_price'])
-                with self.pipeline.lock:
-                    if code in self.pipeline.data_1m and not self.pipeline.data_1m[code].empty:
-                        df = self.pipeline.data_1m[code]
-                        cur_p = df['close'].iloc[-1]
+                # [중요] 모든 지표를 '실질 수익률' 기반으로 통일하여 표기
+                profit_rate = get_net_roi(code, data)
                 
-                profit_rate = ((cur_p - data['buy_price']) / data['buy_price']) * 100.0 if data['buy_price'] > 0 else 0
-                pnl_amt = (cur_p - data['buy_price']) * data['qty']
+                # 순수익 금액(Net PnL) 계산: 투자원금 * 실질 수익률
                 invest_amt = data['buy_price'] * data['qty']
-                valuation_amt = cur_p * data['qty']
+                pnl_amt = invest_amt * (profit_rate / 100.0)
+                valuation_amt = invest_amt + pnl_amt
+                
+                cur_p = data.get('current_price', data['buy_price'])
+                if code in self.pipeline.data_1m and not self.pipeline.data_1m[code].empty:
+                    cur_p = self.pipeline.data_1m[code]['close'].iloc[-1]
+                
+                ref_p = self.pipeline.reference_prices.get(code, cur_p)
                 day_change_rate = ((cur_p - ref_p) / ref_p * 100) if ref_p > 0 else 0
                 pos_weight = (valuation_amt / total_account_value * 100) if total_account_value > 0 else 0
                 
@@ -445,6 +476,11 @@ class Dashboard(QMainWindow):
                 p_color = "#FF8A80" if profit_rate > 0 else "#92B9F9" if profit_rate < 0 else "#80868B"
                 p_item.setForeground(QColor(p_color))
                 p_item.setFont(QFont("Verdana", 9, QFont.Bold))
+                self.pos_table.setItem(row, 2, p_item)
+                
+                self.pos_table.setItem(row, 3, QTableWidgetItem(f"{int(pnl_amt):+,}"))
+                self.pos_table.setItem(row, 4, QTableWidgetItem(f"{data['qty']:,}"))
+                self.pos_table.setItem(row, 5, QTableWidgetItem(f"{int(valuation_amt):,}"))
                 self.pos_table.setItem(row, 2, p_item)
                 
                 pnl_item = QTableWidgetItem(f"{int(pnl_amt):+,}")

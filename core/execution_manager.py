@@ -53,6 +53,7 @@ class ExecutionManager:
         # 리스크 가드 관련 상태
         self.daily_pnl = 0
         self.is_risk_halt = False
+        self.account_password = os.getenv("ACCOUNT_PASSWORD", "0000")
         
         # 스레드 안전성 확보를 위한 락
         self.lock = threading.Lock()
@@ -90,8 +91,14 @@ class ExecutionManager:
             return
 
         with self.lock:
+            # 1. 이미 보유 중인 종목인지 체크
             if code in self.positions:
                 self.logger.info(f"[{code}] 이미 보유중인 종목이므로 추가 매수(물타기) 제한합니다.")
+                return
+            
+            # 2. 이미 주문이 발송되어 '체결 대기' 중인 종목인지 체크 (중복 주문 방지)
+            if f"BUY_{code}" in self.pending_orders:
+                self.logger.info(f"[{code}] 이미 매수 주문이 진행 중입니다. 중복 주문을 차단합니다.")
                 return
 
         # [자금 관리] 종목별 비중 결정 (전체 자산의 5%)
@@ -106,8 +113,8 @@ class ExecutionManager:
 
         # 2. 목표 투자금액 산출 (환경변수 비중 적용)
         invest_rate = self.INVEST_RATE_PER_STOCK
-        # 초기 자산이 로드되지 않았을 경우, 현재 예수금을 임시 기준으로 사용
-        base_assets = self.kiwoom.initial_total_assets if self.kiwoom.initial_total_assets > 0 else self.kiwoom.available_cash
+        # [수정] 총 자산 인식이 엇갈릴 경우를 대비해 현금과 총 자산 중 큰 값을 기준 자산으로 삼음
+        base_assets = max(self.kiwoom.initial_total_assets, self.kiwoom.available_cash)
         
         target_budget = base_assets * invest_rate
         qty = int(target_budget / current_price)
@@ -138,8 +145,10 @@ class ExecutionManager:
             # Kiwoom 코어에 주문 위임
             self.logger.warning(f"🚀 [{code}] 진입 매수 주문 발송 (가격: {current_price:,}원, 수량: {qty}주)")
             
-            # [핵심] 주문 발송 직후 가상 예약금 즉시 합산 (Race Condition 방지)
-            self.kiwoom.reserved_cash += (current_price * qty)
+            # Kiwoom 코어에 주문 위임
+            self.logger.warning(f"🚀 [{code}] 진입 매수 주문 발송 (가격: {current_price:,}원, 수량: {qty}주)")
+            
+            # [수정] 수동 예약금 관리를 제거하고 API 동기화에 의존 (시차 방지)
             self.kiwoom.send_order("BuyOrder", "1001", 1, code, qty, 0, "03", "")
             
             # 미체결 추적 등록
@@ -154,7 +163,13 @@ class ExecutionManager:
     def execute_sell(self, code, pipeline, sell_type="익절"):
         """보유 종목 시장가 전량 청산 (sell_type: '익절' 또는 '손절')"""
         with self.lock:
+            # 1. 보유 중인 종목인지 체크
             if code not in self.positions:
+                return
+            
+            # 2. 이미 매도 주문이 진행 중인지 체크 (중복 매도 방지)
+            if f"SELL_{code}" in self.pending_orders:
+                self.logger.info(f"[{code}] 이미 매도 주문이 진행 중입니다. 중복 매도를 차단합니다.")
                 return
                 
             qty = self.positions[code]['qty']
@@ -201,14 +216,25 @@ class ExecutionManager:
             current_price = df_1m['close'].iloc[-1]
             buy_price = pos_data['buy_price']
             
-            # 1. 최고가 갱신 (Trailing Stop 준비)
+            # [Net ROI 공식 통합] 키움 서버가 계산한 수익률(세금/수수료 포함)이 있다면 최우선 사용
+            if 'api_profit_rate' in pos_data:
+                profit_rate = pos_data['api_profit_rate']
+                is_official = True
+            else:
+                # API 데이터가 아직 동기화 전일 경우만 자체 계산 (단, 제비용 약 -0.25%를 선행 감안)
+                # (Formula: (current - buy) / buy * 100 - 0.25)
+                profit_rate = (((current_price - buy_price) / buy_price) * 100.0) - 0.25
+                is_official = False
+            
+            # 1. 최고가(High Price) 및 실질 최고 수익률(High Net Profit) 갱신
             if 'high_price' not in pos_data:
                 pos_data['high_price'] = current_price
             else:
                 pos_data['high_price'] = max(pos_data['high_price'], current_price)
             
             high_price = pos_data['high_price']
-            profit_rate = ((current_price - buy_price) / buy_price) * 100.0
+            # 트레일링 스톱 판단의 기준이 되는 '고점 수익률'도 실질 수익률(Net) 기준으로 산출
+            high_net_profit_rate = (((high_price - buy_price) / buy_price) * 100.0) - 0.25
             
             # 2. 리스크 가드: 당일 실현 손실 한도 체크
             if not self.is_risk_halt and self.FIXED_LOSS_LIMIT > 0:
@@ -221,21 +247,22 @@ class ExecutionManager:
                 self.execute_sell(code, pipeline, sell_type="리스크가드_전량청산")
                 continue
 
-            # 3. 매도 전략 판별 (손절 -> 트레일링 스톱 -> 익절 순)
+            # 3. 매도 전략 판별 (손절 -> 트레일링 스톱 -> 익절 순) - [공식/추정 실질 수익률] 기준
             # [A] 하드 스톱 (환경변수 기준 손절)
             if profit_rate <= self.STOP_LOSS * 100.0:
-                self.logger.warning(f"[{code}] 손절선({self.STOP_LOSS*100:.1f}%) 도달 ({profit_rate:.2f}%) -> 청산 진행")
+                p_type = "공식" if is_official else "추정"
+                self.logger.warning(f"[{code}] {p_type} 실질 손절선({self.STOP_LOSS*100:.1f}%) 도달 ({profit_rate:.2f}%) -> 청산")
                 self.execute_sell(code, pipeline, sell_type="손절")
                 
-            # [B] 트레일링 스톱 (환경변수 기준: 수익 % 도달 후 고점 대비 % 하락 시 매도)
-            high_profit_rate = ((high_price - buy_price) / buy_price) * 100.0
-            if high_profit_rate >= self.TRAILING_STOP_ACTIVATION * 100.0 and current_price < high_price * (1.0 - self.TRAILING_STOP_CALLBACK):
-                self.logger.info(f"[{code}] 트레일링 스톱 발동 (고점 {high_profit_rate:.2f}% -> 현재 {profit_rate:.2f}%, 하락폭 {self.TRAILING_STOP_CALLBACK*100:.1f}%)")
+            # [B] 트레일링 스톱 (실질 고점 수익률 % 도달 후 고점 대비 % 하락 시 매도)
+            elif high_net_profit_rate >= self.TRAILING_STOP_ACTIVATION * 100.0 and current_price < high_price * (1.0 - self.TRAILING_STOP_CALLBACK):
+                self.logger.info(f"[{code}] 트레일링 스톱 발동 (실질고점 {high_net_profit_rate:.2f}% -> 현재 {profit_rate:.2f}%, 하락폭 {self.TRAILING_STOP_CALLBACK*100:.1f}%)")
                 self.execute_sell(code, pipeline, sell_type="트레일링스톱")
  
             # [C] 고정 익절 (환경변수 기준 익절)
             elif profit_rate >= self.TARGET_PROFIT * 100.0:
-                self.logger.info(f"[{code}] 익절선({self.TARGET_PROFIT*100:.1f}%) 도달 ({profit_rate:.2f}%) -> 청산 진행")
+                p_type = "공식" if is_official else "추정"
+                self.logger.info(f"[{code}] {p_type} 실질 익절선({self.TARGET_PROFIT*100:.1f}%) 도달 ({profit_rate:.2f}%) -> 청산")
                 self.execute_sell(code, pipeline, sell_type="익절")
 
     def monitor_pending_orders(self):
@@ -294,6 +321,9 @@ class ExecutionManager:
         with self.lock:
             if "매수" in order_type_code:
                 order_type = "매수"
+                # 매수 시 예약금(reserved_cash)을 실제 예수금 소급분으로 전환 (이미 빠져나간 돈으로 처리)
+                # 실제 예수금 동기화는 아래 request_account_info에서 처리됨
+                
                 # 메모리 포지션 업데이트
                 if code in self.positions:
                     old_qty = self.positions[code]['qty']
@@ -305,8 +335,16 @@ class ExecutionManager:
                 else:
                     self.positions[code] = {'buy_price': price, 'qty': qty, 'high_price': price}
                     
+                    # 🔔 [실시간 등록] 신규 매수한 종목에 대해 실시간 데이터 수신 등록
+                    if not self.is_dry_run:
+                        self.kiwoom.set_real_reg("1000", [code], "10;15;20", "1")
+                        self.logger.info(f"🚀 [{code}] 신규 매수 포지션 실시간 감시 시작")
+                    
             else: # 매도 체결
                 order_type = "매도(청산)"
+                # [수정] 매도 시 예수금 수동 선반영 제거 (API 동기화 의존)
+                pass
+
                 # 실현 손익 정산 (리스크 가드용)
                 if code in self.positions:
                     avg_buy_price = self.positions[code]['buy_price']
@@ -314,8 +352,9 @@ class ExecutionManager:
                     profit_rate = (price - avg_buy_price) / avg_buy_price * 100
                     pnl_info = f" | 수익: {int(pnl):+,}원 ({profit_rate:+.2f}%)"
                     
-                    self.daily_pnl += pnl
-                    self.logger.debug(f"[{code}] 매도 체결로 인한 손익 발생: {pnl:,.0f}원 (당일 누적: {self.daily_pnl:,.0f}원)")
+                    # [수정] 수동 손익 합산을 제거하고 API 공식 동기화(opt10074)에 의존함
+                    # self.daily_pnl += pnl 
+                    self.logger.debug(f"[{code}] 매도 체결 발생 (공식 손익 동기화 대기 중...)")
                     
                     # 매도 체결 즉시 리스크 가드 체크
                     if not self.is_risk_halt and self.FIXED_LOSS_LIMIT > 0:
@@ -326,17 +365,75 @@ class ExecutionManager:
                             self.is_risk_halt = True
 
                     self.positions[code]['qty'] -= qty
-                    if self.positions[code]['qty'] <= 0:
-                        del self.positions[code]
+        # 🔔 [서버 동기화] 체결 직후 최신 계좌 상태(예수금/손익) 강제 업데이트 요청
+        if not self.is_dry_run:
+            self.kiwoom.request_account_info(self.account_password)
+            self.kiwoom.request_daily_pnl() # 실현손익 동기화 추가
+            self.logger.debug("🔄 체결 후 실시간 계좌 및 실현손익 동기화 요청 발송")
+
+        # 종목명 확보 및 알림 전송 (코드 정규화 보강)
+        clean_code = code.replace("A", "").strip().zfill(6)
+        name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", clean_code)
+        name = name.strip() if hasattr(name, 'strip') else clean_code
         
-        # 종목명 확보 및 알림 전송
-        name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code)
-        name = name.strip() if hasattr(name, 'strip') else code
-        
-        exec_msg = f"[{order_type} 체결완료] *{name}({code})* | {int(price):,}원 | {qty}주{pnl_info}"
+        # [고도화] 전체 보유 수량(Total) 정보를 포함하여 분할 체결 시의 혼란 방지
+        current_total_qty = self.positions[code]['qty'] if code in self.positions else 0
+        exec_msg = f"[{order_type}] *{name}({code})* | {int(price):,}원 | {qty}주 체결 (총 보유: {current_total_qty}주){pnl_info}"
         self.slack.send_message(exec_msg)
         # DB 영속화
         self.db.insert_execution(order_no, code, price, qty, order_type)
+
+    def sync_server_positions(self, server_pos_dict):
+        """
+        서버(Kiwoom)로부터 받은 공식 잔고 현황으로 로컬 포지션을 100% 동기화합니다.
+        가장 정확한 'Ultimate Truth' 데이터를 기반으로 합니다.
+        """
+        with self.lock:
+            # 1. 서버 정보로 덮어쓰기
+            for code, data in server_pos_dict.items():
+                if code not in self.positions:
+                    self.positions[code] = {
+                        'buy_price': data['buy_price'],
+                        'qty': data['qty'],
+                        'high_price': data['buy_price'] # 초기 고점은 매입가로 설정
+                    }
+                else:
+                    # 기존 보유 중이면 수량과 평단가만 최신화 (고점 기록은 유지)
+                    self.positions[code]['qty'] = data['qty']
+                    self.positions[code]['buy_price'] = data['buy_price']
+            
+            # 2. 서버 잔고에 없는 종목은 로컬에서도 제거 (전량 매도 반영)
+            local_codes = list(self.positions.keys())
+            for code in local_codes:
+                if code not in server_pos_dict:
+                    self.logger.info(f"🗑️ [{code}] 서버 잔고에 없음 -> 로컬 포지션 삭제 및 감시 종료")
+                    del self.positions[code]
+                    if not self.is_dry_run:
+                        self.kiwoom.set_real_remove("1000", code)
+
+    def sync_single_position(self, code, qty, avg_price):
+        """
+        실시간 잔고 통보(sGubun=1)를 기반으로 특정 종목의 상태만 즉시 업데이트합니다.
+        매매 체결 직후 키움이 계산한 공식 데이터를 반영합니다.
+        """
+        with self.lock:
+            if qty <= 0:
+                if code in self.positions:
+                    self.logger.info(f"🚫 [{code}] 잔고 0 확인 -> 포지션 제거")
+                    del self.positions[code]
+                    if not self.is_dry_run:
+                        self.kiwoom.set_real_remove("1000", code)
+            else:
+                if code not in self.positions:
+                    self.positions[code] = {
+                        'buy_price': avg_price,
+                        'qty': qty,
+                        'high_price': avg_price
+                    }
+                else:
+                    self.positions[code]['qty'] = qty
+                    self.positions[code]['buy_price'] = avg_price
+                self.logger.info(f"✅ [{code}] 실시간 잔고 동기화 완료: {qty}주 @ {avg_price:,.0f}원")
 
     def clear_pending_orders(self):
         """현재 추적 중인 모든 미체결 주문 목록을 비웁니다."""

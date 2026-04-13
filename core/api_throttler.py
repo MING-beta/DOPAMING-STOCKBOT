@@ -92,6 +92,20 @@ class ApiThrottler:
                     QMessageBox.warning(None, "계좌 데이터 요청 실패 (-202)", 
                                         "계좌 비밀번호가 OpenAPI 시스템에 등록되지 않았습니다.")
 
+        elif req_type == "opt10074":
+            rqname = "opt10074_req"
+            self.kiwoom_core.dynamicCall("SetInputValue(QString, QString)", "계좌번호", req.get("account"))
+            self.kiwoom_core.dynamicCall("SetInputValue(QString, QString)", "시작일자", req.get("start_date"))
+            self.kiwoom_core.dynamicCall("SetInputValue(QString, QString)", "종료일자", req.get("end_date"))
+            
+            ret = self.kiwoom_core.dynamicCall("CommRqData(QString, QString, int, QString)", rqname, "opt10074", 0, "2000")
+            if ret == 0:
+                self.logger.info(f"💰 [P{priority} 실현손익] opt10074 요청 발송 ({req.get('start_date')})")
+            else:
+                self.logger.error(f"⚠️ [P{priority} 요청실패] opt10074 (에러: {ret})")
+                if ret == -200:
+                    self._retry_later(req)
+
     def _retry_later(self, req):
         """과부하 에러(-200) 발생 시 시스템을 5초간 일시 정지하고 3초 후 재시도 합니다."""
         if not self._is_paused:

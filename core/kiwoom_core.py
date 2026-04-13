@@ -181,15 +181,20 @@ class KiwoomCore(QAxWidget):
         })
         self.logger.debug(f"[스로틀링 큐 적재] 당일 실현손익(opt10074) 요청: {today}")
 
-    def request_opt10080(self, code):
+    def request_opt10080(self, code, prev_next=0):
         """1분봉 차트 조회를 Throttler를 통해 지시하며, 기준가(전일종가)를 동기화합니다."""
         # 전일 종가 동기화 (대시보드 등락률용 정밀 보정)
         prev_close = self.get_master_last_price(code)
         if self.data_pipeline:
             self.data_pipeline.reference_prices[code] = prev_close
             
-        self.throttler.put({"type": "opt10080", "code": code})
-        self.logger.debug(f"[스로틀링 큐 적재] 과거 차트(opt10080) 및 기준가({prev_close}) 요청: {code}")
+        self.throttler.put({
+            "type": "opt10080", 
+            "code": code, 
+            "prev_next": prev_next,
+            "rqname": f"opt10080_req_{code}" # 연속 조회 시 RQName이 동일해야 함
+        })
+        self.logger.debug(f"[스로틀링 큐 적재] 과거 차트(opt10080) 요청: {code} (next={prev_next})")
 
     def send_order(self, rqname, screen_no, order_type, code, qty, price, hoga_gb, org_order_no):
         """메인 주문 전송"""

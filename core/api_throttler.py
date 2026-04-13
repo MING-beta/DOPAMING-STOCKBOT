@@ -21,7 +21,7 @@ class ApiThrottler:
         # 초당 4회 제한(250ms)으로 조정하여 '시세 과부하(-200)' 방어 및 안정성 확보
         self.throttle_timer = QTimer()
         self.throttle_timer.timeout.connect(self._process_request_queue)
-        self.throttle_timer.start(250) 
+        self.throttle_timer.start(500) 
         
         self._is_paused = False # 과부하 보호를 위한 정지 플래그
 
@@ -61,17 +61,19 @@ class ApiThrottler:
                 
         elif req_type == "opt10080": 
             code = req.get("code")
-            rqname = f"opt10080_req_{code}"
+            rqname = req.get("rqname", f"opt10080_req_{code}")
+            prev_next = req.get("prev_next", 0)
+            
             self.kiwoom_core.dynamicCall("SetInputValue(QString, QString)", "종목코드", code)
             self.kiwoom_core.dynamicCall("SetInputValue(QString, QString)", "틱범위", "1")
             self.kiwoom_core.dynamicCall("SetInputValue(QString, QString)", "수정주가구분", "1")
             
-            ret = self.kiwoom_core.dynamicCall("CommRqData(QString, QString, int, QString)", rqname, "opt10080", 0, "2000")
+            ret = self.kiwoom_core.dynamicCall("CommRqData(QString, QString, int, QString)", rqname, "opt10080", prev_next, "2000")
             if ret == 0:
-                self.logger.info(f"📊 [P{priority} 데이터수신] {code} 1분봉 요청 완료")
+                self.logger.info(f"📊 [P{priority} 데이터수신] {code} 1분봉 요청 완료 (prev_next={prev_next})")
             else:
                 self.logger.error(f"⚠️ [P{priority} 요청실패] {code} 데이터 (에러: {ret})")
-                if ret == -200:
+                if ret in [-200, -300]:
                     self._retry_later(req)
 
         elif req_type in ["opw00001", "opw00018"]:
@@ -86,7 +88,7 @@ class ApiThrottler:
                 self.logger.info(f"💳 [P{priority} 계좌조회] {req_type} 발송")
             else:
                 self.logger.error(f"⚠️ [P{priority} 조회실패] {req_type} (에러: {ret})")
-                if ret == -200:
+                if ret in [-200, -300]:
                     self._retry_later(req)
                 elif ret == -202:
                     QMessageBox.warning(None, "계좌 데이터 요청 실패 (-202)", 
@@ -103,7 +105,7 @@ class ApiThrottler:
                 self.logger.info(f"💰 [P{priority} 실현손익] opt10074 요청 발송 ({req.get('start_date')})")
             else:
                 self.logger.error(f"⚠️ [P{priority} 요청실패] opt10074 (에러: {ret})")
-                if ret == -200:
+                if ret in [-200, -300]:
                     self._retry_later(req)
 
     def _retry_later(self, req):

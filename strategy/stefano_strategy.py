@@ -202,7 +202,22 @@ class StefanoStrategy:
             # 볼린저 밴드 하단 대비 진입 허용폭 (공격모드 1.05, 일반 1.02)
             bb_multiplier = float(os.getenv("STRATEGY_BB_GAP", "1.05" if self.is_aggressive else "1.02"))
             
-            if micro_div:
+            # [필터 강화 v3.3] EMA 120 추세 필터 및 RSI 반등 확인
+            ema120 = df_1m['EMA120'].iloc[-1]
+            vol_mean = df_1m['volume'].iloc[-20:-1].mean()
+            vol_ratio = df_1m['volume'].iloc[-1] / vol_mean if vol_mean > 0 else 1.0
+            rsi_1m = df_1m['RSI'].iloc[-1]
+            
+            # 1. 주가가 장기 이평선(EMA120) 위에 있는가? (하락 대세 종목 배제)
+            # 2. RSI가 40을 넘었는가? (바닥 다진 후 반등 확인)
+            # 3. 거래량이 평균 대비 50% 이상 폭증했는가?
+            is_uptrend = last_price > ema120
+            is_recovering = rsi_1m >= 40 
+            is_vol_spike = vol_ratio >= 1.5
+            
+            self.logger.info(f"[{code}] 📊 필터v3.3: 추세(Price>EMA120)={is_uptrend}, 반등(RSI {rsi_1m:.1f}>=40)={is_recovering}, 거래량(Ratio {vol_ratio:.1f}>=1.5)={is_vol_spike}")
+            
+            if micro_div and is_recovering and (is_uptrend or is_vol_spike):
                 if last_price <= bb_lower * bb_multiplier:  
                     # ── AI 최종 승인 게이트 ─────────────────────────────────
                     if self.ai_engine:
@@ -279,6 +294,7 @@ class StefanoStrategy:
             bb_std = 1.5  # 공격적 모드: 밴드 너비를 좁혀 하단 터치(매수 기회) 확률 증폭
         
         df['MA20'] = df['close'].rolling(window=bb_period).mean()
+        df['EMA120'] = df['close'].ewm(span=120, adjust=False).mean() # 장기 추세 필터
         df['STD20'] = df['close'].rolling(window=bb_period).std()
         df['BB_Upper'] = df['MA20'] + (df['STD20'] * bb_std)
         df['BB_Lower'] = df['MA20'] - (df['STD20'] * bb_std)

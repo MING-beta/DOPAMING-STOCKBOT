@@ -314,12 +314,15 @@ class EventHandler:
             if self.kc.execution_manager:
                 self.kc.execution_manager.sync_server_positions(server_pos)
                 
-                # 🔔 [실시간 보강] 서버에서 확인된 전 종목을 실시간 수신 대상으로 다시 등록
-                if server_pos:
-                    codes = list(server_pos.keys())
-                    self.kc.set_real_reg("1000", codes, "10;15;20", "1")
-                    self.logger.info(f"💼 [보유 종목 실시간 연동] {len(codes)}개 종목 실시간 수신 등록 완료")
+            # 🔔 [실시간 보강] 서버에서 확인된 전 종목을 실시간 수신 대상으로 다시 등록
+            if server_pos:
+                codes = list(server_pos.keys())
+                self.kc.set_real_reg("1000", codes, "10;15;20", "1")
+                self.logger.info(f"💼 [보유 종목 실시간 연동] {len(codes)}개 종목 실시간 수신 등록 완료")
                 
+            # [도구 연동용] 서버 포지션 데이터를 코어에 노출
+            self.kc.server_positions = server_pos
+            
             # 계좌 연동이 모두 끝났으므로 조건식 로드 킥오프
             self.kc.get_condition_load()
             return
@@ -339,6 +342,8 @@ class EventHandler:
         # 3. 주식 분봉 차트 조회 TR 응답 처리
         elif sRQName.startswith("opt10080_req_"):
             code = sRQName.replace("opt10080_req_", "")
+            
+            self.logger.info(f"[{code}] 분봉 데이터 수신 중 (RQ: {sRQName}, Next: {sPrevNext})")
             
             # GetCommDataEx를 사용하여 한 번에 2차원 배열로 전체 데이터를 받아옴으로써
             # COM 객체 통신 부하 및 Qt Stack Buffer Overrun (0xc0000409) 에러 방지
@@ -378,4 +383,4 @@ class EventHandler:
             # DataFrame으로 묶어서 데이터 파이프라인으로 전송 (가장 빠른 시간이 위로 가도록 정렬)
             if records and self.kc.data_pipeline:
                 df = pd.DataFrame(records).set_index('date_idx').sort_index(ascending=True)
-                self.kc.data_pipeline.add_historical_data(code, df)
+                self.kc.data_pipeline.add_historical_data(code, df, sPrevNext)

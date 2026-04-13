@@ -1,0 +1,145 @@
+INFO:DopamingBot.StefanoStrategy:[TEST_BB] \U0001f50e 대기중... RSI(1m)=0.0, 현재가=80,000, BB하단=84857.9
+INFO:DopamingBot.StefanoStrategy:[TEST_BB] \u2753 매수조건: 1분 다이버전스=True, BB하단 근접=True
+WARNING:DopamingBot.StefanoStrategy:[TEST_BB] \U0001f4a5 1분봉 이중 다이버전스 + BB 하단 통과! 매수 실행!
+INFO:DopamingBot.StefanoStrategy:[TEST_BB] \U0001f50e 대기중... RSI(1m)=100.0, 현재가=245,000, BB하단=138339.2
+INFO:DopamingBot.StefanoStrategy:[TEST_BB] \u2753 매수조건: 1분 다이버전스=True, BB하단 근접=False
+INFO:DopamingBot.StefanoStrategy:[TEST_BB] \u26a0\ufe0f 1분봉 다이버전스는 형성되었으나, 주가(245,000)가 BB하단(138,339.2) 대비 너무 많이 반등했습니다.
+.INFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+E.INFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+EINFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+EINFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+EINFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+WARNING:DopamingBot.ExecutionManager:\u23f0 *[미체결 타임아웃 경고]* `005930` 매수 주문이 65초 경과 후에도 미체결 상태입니다. → 자동 취소 시도
+WARNING:DopamingBot.ExecutionManager:[005930] 미체결 주문 취소 요청 발송 완료
+FINFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+EINFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+INFO:DopamingBot.ExecutionManager:[실체결 통지] 100000 | 가격:850000 | 수량:1 | 타입:-매도
+DEBUG:DopamingBot.ExecutionManager:[100000] 매도 체결로 인한 손익 발생: -150,000원 (당일 누적: -150,000원)
+INFO:DopamingBot.ExecutionManager:[실체결 통지] 200000 | 가격:1900000 | 수량:1 | 타입:-매도
+DEBUG:DopamingBot.ExecutionManager:[200000] 매도 체결로 인한 손익 발생: -100,000원 (당일 누적: -250,000원)
+CRITICAL:DopamingBot.ExecutionManager:\U0001f6d1 [리스크 가드] 실시간 손실 한도 도달 (-250,000원 / 한도: 200,000원)
+ERROR:DopamingBot.ExecutionManager:\u26a0\ufe0f [리스크 가드] 당일 손실 한도 초과로 인해 [005930] 매수를 차단합니다.
+.INFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+EINFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+EINFO:DopamingBot.ExecutionManager:\U0001f916 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)
+E
+======================================================================
+ERROR: test_buy_creates_position (test_trade.TestExecutionSimulation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\test_trade.py", line 38, in test_buy_creates_position
+    manager.execute_buy("005930", pipeline)
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\core\execution_manager.py", line 125, in execute_buy
+    if required_cash > effective_cash:
+TypeError: '>' not supported between instances of 'int' and 'MagicMock'
+
+======================================================================
+ERROR: test_money_management_qty_calculation (test_trade.TestExecutionSimulation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\test_trade.py", line 216, in test_money_management_qty_calculation
+    manager.execute_buy("TEST01", pipeline)
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\core\execution_manager.py", line 125, in execute_buy
+    if required_cash > effective_cash:
+TypeError: '>' not supported between instances of 'int' and 'MagicMock'
+
+======================================================================
+ERROR: test_no_duplicate_buy (test_trade.TestExecutionSimulation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\test_trade.py", line 54, in test_no_duplicate_buy
+    manager.execute_buy("005930", pipeline)
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\core\execution_manager.py", line 125, in execute_buy
+    if required_cash > effective_cash:
+TypeError: '>' not supported between instances of 'int' and 'MagicMock'
+
+======================================================================
+ERROR: test_no_exit_within_bounds (test_trade.TestExecutionSimulation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\test_trade.py", line 99, in test_no_exit_within_bounds
+    manager.execute_buy("005930", self._make_pipeline(80000))
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\core\execution_manager.py", line 125, in execute_buy
+    if required_cash > effective_cash:
+TypeError: '>' not supported between instances of 'int' and 'MagicMock'
+
+======================================================================
+ERROR: test_profit_take_at_plus4 (test_trade.TestExecutionSimulation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\test_trade.py", line 67, in test_profit_take_at_plus4
+    manager.execute_buy("005930", self._make_pipeline(80000))
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\core\execution_manager.py", line 125, in execute_buy
+    if required_cash > effective_cash:
+TypeError: '>' not supported between instances of 'int' and 'MagicMock'
+
+======================================================================
+ERROR: test_slack_notification_on_execution (test_trade.TestExecutionSimulation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\test_trade.py", line 113, in test_slack_notification_on_execution
+    manager.execute_buy("005930", self._make_pipeline(80000))
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\core\execution_manager.py", line 125, in execute_buy
+    if required_cash > effective_cash:
+TypeError: '>' not supported between instances of 'int' and 'MagicMock'
+
+======================================================================
+ERROR: test_stop_loss_at_minus2 (test_trade.TestExecutionSimulation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\test_trade.py", line 83, in test_stop_loss_at_minus2
+    manager.execute_buy("005930", self._make_pipeline(80000))
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\core\execution_manager.py", line 125, in execute_buy
+    if required_cash > effective_cash:
+TypeError: '>' not supported between instances of 'int' and 'MagicMock'
+
+======================================================================
+ERROR: test_trailing_stop_logic (test_trade.TestExecutionSimulation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\test_trade.py", line 160, in test_trailing_stop_logic
+    manager.execute_buy("005930", pipeline)
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\core\execution_manager.py", line 125, in execute_buy
+    if required_cash > effective_cash:
+TypeError: '>' not supported between instances of 'int' and 'MagicMock'
+
+======================================================================
+FAIL: test_pending_order_timeout_triggers_slack (test_trade.TestExecutionSimulation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\dopaming\Dopaming-Stock-Bot\test_trade.py", line 145, in test_pending_order_timeout_triggers_slack
+    self.assertTrue(slack.send_message.called, "Slack 타임아웃 경고가 발송되지 않음!")
+AssertionError: False is not true : Slack 타임아웃 경고가 발송되지 않음!
+
+----------------------------------------------------------------------
+Ran 12 tests in 1.154s
+
+FAILED (failures=1, errors=8)
+
+[CASE 13] 볼린저 밴드 필터링(하단선 근접 여부) 검증
+  -> 현재가: 91000, BB하단: 88668
+  -> BB 하단 필터링 동작 확인 완료
+
+[CASE 1] 매수 체결 포지션 생성 검증
+
+[CASE 11] 일일 요약 리포트 산출 검증
+  -> 일일 리포트 요약(수익 40,000원) 산출 확인 완료
+
+[CASE 12] 자금 관리 (5% 비중 수량 산출) 검증
+
+[CASE 2] 중복 매수 방지 검증
+
+[CASE 5] 손익 미달 시 포지션 유지 검증
+
+[CASE 7] 미체결 타임아웃 시 Slack 경고 발송 검증
+
+[CASE 3] +4% 익절 자동 청산 검증
+
+[CASE 10] 리스크 가드(Daily Loss Limit - 20%) 검증
+  -> 리스크 가드(20% 비율 기준) 발동 및 거래 중단 확인 완료
+
+[CASE 6] 체결 시 Slack 알림 발송 검증
+
+[CASE 4] -2% 손절 자동 청산 검증
+
+[CASE 9] 트레일링 스톱 로직 검증

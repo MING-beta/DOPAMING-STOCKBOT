@@ -174,15 +174,19 @@ class DataPipeline:
             except Exception as e:
                 self.logger.error(f"파이프라인 워커 스레드 에러: {e}")
 
-    def add_historical_data(self, code, history_df_1m):
+    def add_historical_data(self, code, history_df_1m, has_next="0"):
         """
         초기화 시 대량의 과거 1분봉 데이터를 한 번에 밀어넣습니다.
-        실시간으로 이미 수신된 데이터와 중복될 수 있으므로 병합 후 정렬합니다.
+        has_next: "2" 이면 더 가져올 데이터가 있다는 뜻 (키움 sPrevNext)
         """
         if history_df_1m.empty:
             return
             
         with self.lock:
+            # 다음 조회가 필요한지 여부 저장 (data_fetcher 등에서 활용)
+            if not hasattr(self, 'next_state'): self.next_state = {}
+            self.next_state[code] = has_next
+            
             if code not in self.data_1m:
                 self.data_1m[code] = history_df_1m
             else:

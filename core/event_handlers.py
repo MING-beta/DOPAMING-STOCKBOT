@@ -50,8 +50,7 @@ class EventHandler:
         if code_list == ['']: code_list = []
         
         # 블랙리스트(상한가 등) 사전 필터링
-        if hasattr(self.kc, 'blacklisted_codes'):
-            code_list = [c for c in code_list if c not in self.kc.blacklisted_codes]
+        code_list = [c for c in code_list if c not in self.kc.blacklisted_codes]
             
         self.logger.info(f"검색된 종목 수: {len(code_list)}건 -> {code_list}")
         
@@ -69,17 +68,17 @@ class EventHandler:
         if code_list:
             self.kc.set_real_reg("1000", code_list, "10;15;20", "0") # FID: 10(현재가), 15(거래량), 20(체결시간)
             for code in code_list:
+                self.kc.get_master_code_name(code) # [성능 최적화] 종목명 선제적 캐싱
                 self.kc.request_opt10080(code)
 
     def on_receive_real_condition(self, strCode, strType, strConditionName, strConditionIndex):
         """
         실시간 조건검색 편입(I)/이탈(D) 이벤트 처리
-        - strType == 'I': 조건 편입 → 감시 목록 추가 및 실시간 등록
-        - strType == 'D': 조건 이탈 → 유예 리스트 등록 (잠시 후 삭제)
         """
         if strType == 'I':  # 편입
             # 상한가 등으로 블랙리스트된 종목 원천 차단
-            if hasattr(self.kc, 'blacklisted_codes') and strCode in self.kc.blacklisted_codes:
+            if strCode in self.kc.blacklisted_codes:
+                self.logger.debug(f"🚫 [차단] {strCode} - 블랙리스트(상한가 등) 종목으로 편입을 거절합니다.")
                 return
 
             # [Hysteresis] 유예 목록에 있다면 즉시 복구 (삭제 예약 취소)
@@ -124,6 +123,7 @@ class EventHandler:
 
             # 2. 신규 종목 등록
             self.kc.monitored_codes[strCode] = time.time()
+            self.kc.get_master_code_name(strCode) # [성능 최적화] 종목명 선제적 캐싱
             self.logger.info(f"[실시간 조건 편입] {strCode} ← {strConditionName} | 감시 종목: {len(self.kc.monitored_codes)}/{max_monitored}")
             self.kc.set_real_reg("1000", [strCode], "10;15;20", "1")
             self.kc.request_opt10080(strCode)
@@ -169,9 +169,6 @@ class EventHandler:
                 if fluctuation_str:
                     fluctuation_rate = float(fluctuation_str.replace('+', ''))
                     if fluctuation_rate >= 29.8:
-                        if not hasattr(self.kc, 'blacklisted_codes'):
-                            self.kc.blacklisted_codes = set()
-                            
                         if sCode not in self.kc.blacklisted_codes:
                             self.logger.warning(f"🚫 [상한가 도달] {sCode} 종목이 상한가({fluctuation_rate}%)에 도달하여 감시를 영구 종료 및 제외합니다.")
                             self.kc.blacklisted_codes.add(sCode)
@@ -204,20 +201,29 @@ class EventHandler:
             exec_price_str = self.kc.dynamicCall("GetChejanData(int)", 910).replace(',', '').replace('+', '').replace('-', '').strip()
             exec_qty_str = self.kc.dynamicCall("GetChejanData(int)", 911).replace(',', '').replace('+', '').replace('-', '').strip()
             
+            # [추가] 주문 전체 수량 및 누적 체결 수량 확보 (중복 알림 제어용)
+            order_qty_str = self.kc.dynamicCall("GetChejanData(int)", 900).replace(',', '').strip()
+            cumulative_qty_str = self.kc.dynamicCall("GetChejanData(int)", 912).replace(',', '').strip()
+
             if sGubun == "0":  # 0: 주문/체결
                 # 체결 이벤트 로깅 (접수, 확인, 체결 등 모든 상태)
-                self.logger.info(f"💌 [Chejan 체결 통보] 체결상태: {order_status} | 종목: {code} | {order_type_str} | 가격: {exec_price_str} | 수량: {exec_qty_str}")
+                self.logger.info(f"💌 [Chejan 체결 통보] 상태: {order_status} | 종목: {code} | {order_type_str} | 가격: {exec_price_str} | 수량: {exec_qty_str} (누적: {cumulative_qty_str}/{order_qty_str})")
                 
                 # 주문 상태가 '체결'에 도달했고 체결량이 발생했을 때만 기록
                 if order_status == "체결" and exec_price_str and exec_qty_str:
                     try:
                         price = int(exec_price_str)
                         qty = int(exec_qty_str)
+                        order_qty = int(order_qty_str) if order_qty_str else qty
+                        cum_qty = int(cumulative_qty_str) if cumulative_qty_str else qty
                         
                         if price > 0 and qty > 0 and self.kc.execution_manager:
-                            self.kc.execution_manager.record_execution(order_no, code, price, qty, order_status, order_type_str)
+                            self.kc.execution_manager.record_execution(
+                                order_no, code, price, qty, order_status, order_type_str,
+                                cum_qty, order_qty
+                            )
                     except ValueError as e:
-                        self.logger.error(f"❌ [Chejan 파싱 에러] 체결가/체결량 변환 실패: {e}")
+                        self.logger.error(f"❌ [Chejan 파싱 에러] 체결 데이터 변환 실패: {e}")
                         
             elif sGubun == "1": # 1: 잔고 변경
                 # 잔고 변경의 경우 보유수량(930), 매입단가(931) 등의 정보를 받아 즉시 자산을 동기화
@@ -334,6 +340,8 @@ class EventHandler:
                 try:
                     official_pnl = int(pnl_str)
                     self.kc.official_daily_pnl = official_pnl # 공식 손익 저장
+                    if self.kc.execution_manager:
+                        self.kc.execution_manager.daily_pnl = official_pnl # 대시보드 연동용 변수 동기화
                     self.logger.info(f"📊 [공식 수익 동기화] 오늘 실현 손익: {official_pnl:,} 원")
                 except ValueError:
                     self.logger.error("❌ [공식 수익 동기화 오류] 숫자 변환 실패")
@@ -349,10 +357,23 @@ class EventHandler:
             # COM 객체 통신 부하 및 Qt Stack Buffer Overrun (0xc0000409) 에러 방지
             data_arr = self.kc.dynamicCall("GetCommDataEx(QString, QString)", sTrCode, "주식분봉차트조회")
             
-            if not data_arr:
-                self.logger.warning(f"[{code}] 분봉 데이터 응답이 없습니다 (GetCommDataEx 반환값 없음).")
-                return
-                
+            # [선제 방어] 차트 데이터 로드 시점에 이미 상한가면 즉시 제외
+            if data_arr:
+                try:
+                    cur_price = abs(int(data_arr[0][0].strip() or 0))
+                    ref_price = self.kc.data_pipeline.reference_prices.get(code, 0)
+                    if ref_price > 0:
+                        change_rate = (cur_price - ref_price) / ref_price * 100
+                        if change_rate >= 29.8:
+                            self.logger.warning(f"🚫 [상한가 선제 차단] {code} 종목이 이미 상한가({change_rate:.2f}%) 상태이므로 감시 대상에서 즉각 제외합니다.")
+                            self.kc.blacklisted_codes.add(code)
+                            if code in self.kc.monitored_codes:
+                                del self.kc.monitored_codes[code]
+                                self.kc.set_real_remove("1000", code)
+                            return
+                except (ValueError, IndexError):
+                    pass
+
             data_cnt = len(data_arr)
             self.logger.info(f"[{code}] 분봉 과거 데이터 수신: {data_cnt} rows 파싱 시작 (GetCommDataEx)")
             records = []

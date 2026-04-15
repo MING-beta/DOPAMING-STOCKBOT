@@ -17,11 +17,10 @@ class ApiThrottler:
         self.request_queue = queue.PriorityQueue()
         self._counter = itertools.count() # 동일 우선순위 발생 시 선입선출 보장을 위한 타이브레이커
         
-        # 초당 5회 제한(200ms)까지 가속하여 지연 시간 최소화
-        # 초당 4회 제한(250ms)으로 조정하여 '시세 과부하(-200)' 방어 및 안정성 확보
+        # 초당 3.3회 제한(300ms)으로 조정하여 100종목 데이터 싱크 속도 최적화
         self.throttle_timer = QTimer()
         self.throttle_timer.timeout.connect(self._process_request_queue)
-        self.throttle_timer.start(500) 
+        self.throttle_timer.start(300) 
         
         self._is_paused = False # 과부하 보호를 위한 정지 플래그
 
@@ -112,16 +111,16 @@ class ApiThrottler:
         """과부하 에러(-200) 발생 시 시스템을 5초간 일시 정지하고 3초 후 재시도 합니다."""
         if not self._is_paused:
             self._is_paused = True
-            self.logger.warning("🚨 [시스템 보호] 과부하 감지로 인해 모든 API 요청을 5초간 일시 중단합니다.")
+            self.logger.warning("[시스템 보호] 과부하 감지로 인해 모든 API 요청을 5초간 일시 중단합니다.")
             QTimer.singleShot(5000, self._resume_throttler)
             
-        self.logger.warning(f"⏳ [재시도 대기] {req.get('code') or req.get('type')} 요청을 3초 후 큐에 재인큐합니다.")
+        self.logger.warning(f"[WAIT] {req.get('code') or req.get('type')} 요청 3초간 큐 대기합니다.")
         QTimer.singleShot(3000, lambda: self.put(req))
 
     def _resume_throttler(self):
         """시스템 보호 정지를 해제합니다."""
         self._is_paused = False
-        self.logger.info("✅ [시스템 재개] API 요청 중단이 해제되었습니다.")
+        self.logger.info("[시스템 재개] API 요청 중단이 해제되었습니다.")
 
     def clear_queue(self):
         """현재 대기 중인 모든 API 요청을 강제로 삭제합니다."""

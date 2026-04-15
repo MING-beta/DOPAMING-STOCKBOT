@@ -89,7 +89,9 @@ class HistoricalDataFetcher:
                 QTimer.singleShot(2000, self.request_next_code)
 
 if __name__ == "__main__":
-    # 오늘 API로 확인된 실제 보유 종목 리스트
-    target_stocks = ["005290", "010120", "010130", "061040", "203650", "234340"]
-    fetcher = HistoricalDataFetcher(target_stocks, target_count=9000)
+    # 사용자 요청 종목 리스트 (총 74종목)
+    target_stocks = [
+        '493280'
+    ]
+    fetcher = HistoricalDataFetcher(target_stocks, target_count=6300)
     fetcher.run()

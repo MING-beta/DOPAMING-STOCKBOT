@@ -18,31 +18,6 @@ except ImportError:
     DataCollector = None
     AIEngine = None
 
-def _find_valleys(arr, distance=3):
-    """
-    scipy.signal.find_peaks를 대체하기 위한 가벼운 로컬 저점(Valley) 탐색 함수입니다.
-    배열에서 좌우 값보다 작고 일정 간격(distance) 이상 떨어진 인덱스 목록을 반환합니다.
-    
-    Args:
-        arr (list or np.array): RSI 배열 등 1차원 데이터
-        distance (int): 저점 간의 최소 요구 간격(봉 개수)
-        
-    Returns:
-        list: 저점이 발생한 인덱스 번호 목록
-    """
-    valleys = []
-    n = len(arr)
-    # distance 윈도우 필터 적용 (Flat Bottom 처리 위해 양측 비교 분리)
-    for i in range(distance, n - distance):
-        window_left = arr[i - distance : i]
-        window_right = arr[i + 1 : i + distance + 1]
-        
-        # 좌측보다는 작거나 같고(Flat 바텀의 우측 끝단), 우측보다는 작을 때
-        if all(arr[i] <= x for x in window_left) and all(arr[i] < x for x in window_right):
-            if not valleys or (i - valleys[-1]) >= distance:
-                valleys.append(i)
-    return valleys
-
 class StefanoStrategy:
     def __init__(self, check_window=60):
         self.logger = logging.getLogger("DopamingBot.StefanoStrategy")
@@ -55,20 +30,68 @@ class StefanoStrategy:
         # 공격적 매매 플래그 (타점 완화용)
         self.is_aggressive = os.getenv("AGGRESSIVE_MODE", "False").lower() == 'true'
         
+        # [v4.2] 익스트림 테스트 모드 연동 (OR 조건 상시 매수)
+        self.is_extreme_test = os.getenv("EXTREME_TEST_MODE", "False").lower() == 'true'
+        
         # 거시 신호(5분봉) 무시 플래그 (타점 폭주용)
         self.bypass_macro = os.getenv("STRATEGY_BYPASS_MACRO", "False").lower() == 'true'
         if self.bypass_macro:
-            self.logger.warning("🚀 [전략 설정] 거시(5분봉) 필터 우회 모드 활성화 - 1분봉 신호로 즉시 매수합니다.")
+            self.logger.warning("[전략 설정] 거시(5분봉) 필터 우회 모드 활성화 - 1분봉 신호로 즉시 매수합니다.")
+
+        # [v3.6] 거래량 폭증 기준 정합성 (기본 1.1)
+        self.vol_spike_threshold = float(os.getenv("STRATEGY_VOL_RATIO", "1.1"))
+        
+        # [v4.5] 동일 종목 재진입 제한 시간 (초)
+        self.signal_cooldown_limit = int(os.getenv("STRATEGY_SIGNAL_COOLDOWN", "1800"))
+
+        # [v4.5] V자 반등(Nitro) 전용 환경 변수 로드
+        self.nitro_rsi_limit    = float(os.getenv("STRATEGY_NITRO_RSI", "33.0"))
+        self.nitro_bb_gap       = float(os.getenv("STRATEGY_NITRO_BB_GAP", "1.002"))
+        self.min_recovery_rate  = float(os.getenv("STRATEGY_MIN_RECOVERY", "0.005"))
+        self.buy_end_time       = os.getenv("STRATEGY_BUY_END_TIME", "14:30")
+        self.bb_width_limit     = float(os.getenv("STRATEGY_BB_WIDTH_LIMIT", "0.03"))
+
+        # [v5.1] 최적화: 루프 내 os.getenv 호출 제거 및 지표 파라미터 캐싱
+        self.rsi_period = int(os.getenv("INDICATOR_RSI_PERIOD", "9" if self.is_aggressive else "14"))
+        self.bb_period = int(os.getenv("INDICATOR_BB_PERIOD", "20"))
+        self.bb_std = float(os.getenv("INDICATOR_BB_STD", "1.5" if self.is_aggressive else "2.0"))
+        self.bb_gap_aggressive  = float(os.getenv("STRATEGY_BB_GAP", "1.05"))
+        self.bb_gap_normal      = float(os.getenv("STRATEGY_BB_GAP", "1.01"))
+        self.macro_rsi_exit     = int(os.getenv("STRATEGY_MACRO_RSI_EXIT", "50"))
+        self.rsi_limit          = int(os.getenv("STRATEGY_RSI_LIMIT", "75" if self.is_aggressive else "45"))
+
+        # [v4.8] 하이퍼 공격형 필터 토글 로드
+        self.require_uptrend    = os.getenv("STRATEGY_REQUIRE_UPTREND", "True").lower() == 'true'
+        self.require_vol_spike  = os.getenv("STRATEGY_REQUIRE_VOL_SPIKE", "True").lower() == 'true'
+        self.scanner_soft_mode  = os.getenv("STRATEGY_SCANNER_SOFT_MODE", "False").lower() == 'true'
 
         # AI 모듈 (main.py에서 set_ai_modules()로 주입)
         self.ai_engine:       "AIEngine"      = None
         self.data_collector:  "DataCollector" = None
+        
+        # [v4.4] 매매 무한 도배 방지용 신호 기록 {code: timestamp}
+        self.signal_cooldowns = {}
+
+    def _find_valleys(self, arr, distance=2):
+        """
+        [v4.2] 저점 탐색 간격을 3->2로 단축하여 미세한 파동도 포착합니다.
+        """
+        valleys = []
+        n = len(arr)
+        for i in range(distance, n - distance):
+            window_left = arr[i - distance : i]
+            window_right = arr[i + 1 : i + distance + 1]
+            
+            if all(arr[i] <= x for x in window_left) and all(arr[i] < x for x in window_right):
+                if not valleys or (i - valleys[-1]) >= distance:
+                    valleys.append(i)
+        return valleys
 
     def set_ai_modules(self, ai_engine, data_collector):
         """main.py에서 AI 엔진과 데이터 수집기를 주입합니다."""
         self.ai_engine      = ai_engine
         self.data_collector = data_collector
-        self.logger.info("✅ AI 모듈 연결 완료 (AIEngine + DataCollector)")
+        self.logger.info("[OK] AI 모듈 연결 완료 (AIEngine + DataCollector)")
 
     # ------------------------------------------------------------------
     # AI Feature 추출 헬퍼
@@ -129,18 +152,48 @@ class StefanoStrategy:
         if df_1m.empty or df_5m.empty:
             return False
             
+        # [v3.9] 1차 관문: 가상 스캐너 (수급 및 변동성 정밀 필터링)
+        # RVOL (최근 20분 평균 대비 현재 거래량) 및 당일 진폭(High-Low) 체크
+        vol_mean = df_1m['volume'].iloc[-20:-1].mean()
+        vol_ratio_scanner = df_1m['volume'].iloc[-1] / vol_mean if vol_mean > 0 else 1.0
+        
+        day_high = df_1m['high'].max()
+        day_low = df_1m['low'].min()
+        day_range_pct = (day_high - day_low) / day_low if day_low > 0 else 0
+        
+        # 공격모드: RVOL 0.7, 진폭 0.3% (매수 기회 확대) / 일반모드: RVOL 1.3, 진폭 1.8%
+        vol_threshold = 0.7 if self.is_aggressive else 1.3
+        range_threshold = 0.003 if self.is_aggressive else 0.018
+        
+        if self.scanner_soft_mode:
+            # 소프트 모드: 최소한의 거래량(1.01)과 진폭(0.1%)만 있어도 통과
+            vol_threshold = 1.01
+            range_threshold = 0.001
+        
+        # [v5.0] 논리 보정: 현재 분(minute) 내 경과 시간에 따른 거래량 문턱값 동적 조절
+        # 1분봉 누적 거래량은 시간이 지날수록 늘어나므로, 현재 초(second)에 비례하여 비교해야 공정함
+        now_dt = df_1m.index[-1]
+        seconds_passed = now_dt.second if hasattr(now_dt, 'second') else 30
+        time_weight = max(seconds_passed, 5) / 60.0 # 최소 5초 가중치 부여
+        
+        dynamic_vol_threshold = vol_threshold * time_weight
+        
+        if vol_ratio_scanner < dynamic_vol_threshold or day_range_pct < range_threshold:
+            self.logger.debug(f"[{code}] [PASS] 스캐너 조건 미달 (RVOL:{vol_ratio_scanner:.2f}/{dynamic_vol_threshold:.2f}, Range:{day_range_pct*100:.2f}%/{range_threshold*100:.2f}%)")
+            return False
+
         # 5분봉 데이터가 부족해도 분석 가능하도록 완화 (거시 필터 우회 시)
         min_5m_len = 5 if self.bypass_macro else 20
         if len(df_1m) < 20 or len(df_5m) < min_5m_len:
-            self.logger.info(f"[{code}] 데이터 수집 중... (1m: {len(df_1m)}개, 5m: {len(df_5m)}개)")
+            self.logger.debug(f"[{code}] 데이터 수집 중... (1m: {len(df_1m)}개, 5m: {len(df_5m)}개)")
             return False
 
         # 1. 보조지표 계산 (캐싱 적용된 고속 버전)
         df_1m = self._get_cached_indicators(code, "1m", df_1m)
         df_5m = self._get_cached_indicators(code, "5m", df_5m)
 
-        # 2. 5분봉(거시적) 다이버전스 감지 (우회 모드 시 무조건 True)
-        macro_div = True if self.bypass_macro else self._check_bullish_divergence(df_5m, window=self.check_window)
+        # 2. 5분봉(거시적) 다이버전스 감지 (거시는 안정성을 위해 distance=2 유지)
+        macro_div = self._check_bullish_divergence(df_5m, window=self.check_window, distance=2)
         current_time = df_5m.index[-1]
         last_price   = df_1m['close'].iloc[-1]
 
@@ -151,105 +204,141 @@ class StefanoStrategy:
         # [최적화] 거시 신호가 감지되면 진입 대기 상태로 전환
         if macro_div:
             if not self.macro_states.get(code, False):
+                self.logger.info(f"[{code}] [MACRO] 5분봉 거시 신호 포착! 1분봉 타점 대기...")
                 self.macro_states[code] = True
                 self._indicator_cache[f"{code}_macro_time"] = current_time
-                self.logger.info(f"[{code}] 5분봉 상승 다이버전스 감지! 진입 State 활성화.")
-
-                # [AI 데이터 수집] 거시 신호 발생 순간의 Feature 캡쳐
-                if self.data_collector:
-                    micro_now = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
-                    features  = self._extract_ai_features(code, df_1m, df_5m, macro_div=True, micro_div=micro_now)
-                    self.data_collector.capture_signal(code, features, last_price)
         else:
             # [전체 검수 보강] 매수 대기 상태(macro_states) 자동 만료(Reset) 로직
             if self.macro_states.get(code, False):
                 entry_time = self._indicator_cache.get(f"{code}_macro_time")
                 
-                # A. 시간 만료: 5분봉 기준 6봉(30분)이 지났는데도 1분봉 타점이 안오면 신호 소멸로 간주
-                # B. 추세 회복: 5분봉 RSI가 특정값(기본 50)을 넘어서면 이미 반등이 끝난 것으로 보고 리셋
+                # A. 시간 만료: 5분봉 기준 12봉(60분)이 지났는데도 1분봉 타점이 안오면 신호 소멸로 간주
                 rsi_5m = df_5m['RSI'].iloc[-1]
                 time_diff = (current_time - entry_time).total_seconds() / 60 if entry_time else 0
                 
-                rsi_exit_limit = int(os.getenv("STRATEGY_MACRO_RSI_EXIT", "50"))
-                if time_diff > 30 or rsi_5m > rsi_exit_limit:
+                if time_diff > 60 or rsi_5m > self.macro_rsi_exit:
+                    self.logger.debug(f"[{code}] [MACRO] 거시 신호 만료 또는 추세 회복으로 상태 초기화 (RSI:{rsi_5m:.1f}, Time:{time_diff:.1f}m)")
                     self.macro_states[code] = False
-                    reason = "시간 경과(30분)" if time_diff > 30 else f"추세 회복(RSI > {rsi_exit_limit})"
+                    reason = "시간 경과(60분)" if time_diff > 60 else f"추세 회복(RSI > {self.macro_rsi_exit})"
                     self.logger.info(f"[{code}] 거시 신호가 유효하지 않아 {reason}로 대기 상태를 해제(Reset)합니다.")
 
-        # [테스트 모드: 모든 지표 상시 연산 및 OR 조건 매수]
-        if getattr(self, 'is_extreme_test', False):
-            micro_div  = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
-            bb_lower   = df_1m['BB_Lower'].iloc[-1]
-            bb_multiplier = 1.05 if getattr(self, 'is_aggressive', False) else 1.02
-            bb_touch   = (last_price <= bb_lower * bb_multiplier)
-            
-            if macro_div or micro_div or bb_touch:
-                self.logger.warning(f"[{code}] 🧪 [체결 테스트 모드] OR 조건 충족 (5m={macro_div}, 1m={micro_div}, bb={bb_touch}) -> 조건 무시 매수 발동!")
-                self.macro_states[code] = False
-                return True
-                
-        # 3. 1분봉(미시적) 이중 다이버전스 및 BB 하단 필터 확인
-        elif self.macro_states.get(code, False):
-            micro_div = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False)
+        # [v2.5 Hybrid] 가시성 확보 모드 (BYPASS_MACRO=True 이면 거시 신호가 없어도 1분봉 스캔 수행)
+        is_visible = self.bypass_macro or self.macro_states.get(code, False)
+
+        # 3. 1분봉(미시적) 이중 다이버전스 및 BB 하단 필터 확인 (미시는 빠른 포착을 위해 distance=1)
+        if is_visible:
+            micro_div = self._check_bullish_divergence(df_1m, window=self.check_window, strict=False, distance=1)
             last_price = df_1m['close'].iloc[-1]
             bb_lower = df_1m['BB_Lower'].iloc[-1]
             rsi_1m = df_1m['RSI'].iloc[-1]
             
-            # [진단 로깅] 매수 대기 중인 종목의 상세 지표를 INFO 레벨로 출력하여 대기 원인 분석
-            self.logger.info(f"[{code}] 🔎 대기중... RSI(1m)={rsi_1m:.1f}, 현재가={last_price:,}, BB하단={bb_lower:.1f}")
-            self.logger.info(f"[{code}] ❓ 매수조건: 1분 다이버전스={micro_div}, BB하단 근접={last_price <= bb_lower * 1.005}")
-
-            # 볼린저 밴드 하단 대비 진입 허용폭 (공격모드 1.05, 일반 1.02)
-            bb_multiplier = float(os.getenv("STRATEGY_BB_GAP", "1.05" if self.is_aggressive else "1.02"))
+            # 볼린저 밴드 하단 대비 진입 허용폭 (공격모드 1.05, 일반 1.01)
+            bb_multiplier = self.bb_gap_aggressive if self.is_aggressive else self.bb_gap_normal
             
             # [필터 강화 v3.3] EMA 120 추세 필터 및 RSI 반등 확인
             ema120 = df_1m['EMA120'].iloc[-1]
             vol_mean = df_1m['volume'].iloc[-20:-1].mean()
             vol_ratio = df_1m['volume'].iloc[-1] / vol_mean if vol_mean > 0 else 1.0
-            rsi_1m = df_1m['RSI'].iloc[-1]
             
-            # 1. 주가가 장기 이평선(EMA120) 위에 있는가? (하락 대세 종목 배제)
-            # 2. RSI가 40을 넘었는가? (바닥 다진 후 반등 확인)
-            # 3. 거래량이 평균 대비 50% 이상 폭증했는가?
-            is_uptrend = last_price > ema120
-            is_recovering = rsi_1m >= 40 
-            is_vol_spike = vol_ratio >= 1.5
+            # 1. 주가가 장기 이평선(EMA120) 위에 있는가? (하락 대세 종목 배제) - 옵션에 따라 우회
+            # 2. RSI가 30.0을 넘었는가? (v2.6: 데드존 제거를 위해 30.0으로 하향)
+            # 3. 거래량이 평균 대비 폭증했는가? - 옵션에 따라 우회
+            # [v5.4] 캔들 몸통 확인 (반등 의지 확인을 위해 당사 분봉 양봉 필수)
+            is_green_candle = last_price > df_1m['open'].iloc[-1]
+            is_recovering = rsi_1m >= 30.0
+            is_uptrend = last_price > ema120 if self.require_uptrend else True
+            is_vol_spike = vol_ratio >= self.vol_spike_threshold if self.require_vol_spike else True
             
-            self.logger.info(f"[{code}] 📊 필터v3.3: 추세(Price>EMA120)={is_uptrend}, 반등(RSI {rsi_1m:.1f}>=40)={is_recovering}, 거래량(Ratio {vol_ratio:.1f}>=1.5)={is_vol_spike}")
+            # [v3.5 추가] RSI 반등(Hook) 확인 (평탄한 경우(>=)도 인정하도록 완화)
+            is_rsi_hook = rsi_1m >= df_1m['RSI'].iloc[-2] if len(df_1m) >= 2 else True
             
-            if micro_div and is_recovering and (is_uptrend or is_vol_spike):
+            # [버그 수정] 백테스트 시뮬레이션 시간과 실제 시간 정합성을 위해 df_1m.index[-1] 사용
+            now_ts = df_1m.index[-1].timestamp()
+            last_signal_time = self.signal_cooldowns.get(code, 0)
+            if now_ts - last_signal_time < self.signal_cooldown_limit: 
+                self.logger.debug(f"[{code}] [PASS] 쿨타임 대기 중 (경과: {int(now_ts - last_signal_time)}s)")
+                return False
+            
+            # [v4.7] 변동성 폭발 필터 (BB Width)
+            bb_upper = df_1m['BB_Upper'].iloc[-1]
+            middle = (bb_upper + bb_lower) / 2
+            bb_width = (bb_upper - bb_lower) / middle if middle != 0 else 0
+            
+            if bb_width > self.bb_width_limit:
+                self.logger.debug(f"[{code}] [PASS] 변동성 과폭 (BB Width:{bb_width*100:.2f}%/{self.bb_width_limit*100}%)")
+                return False
+
+            # [v4.6 Balanced Reversion] 단순 Hook이 아닌 '가격 반등의 질' 검증
+            min_price_10m = df_1m['low'].iloc[-10:].min()
+            actual_recovery = (last_price / min_price_10m) - 1
+            
+            # RSI가 nitro_rsi_limit 이하이면서, 주가가 BB 하단 근격에 있고, 최소 반등폭을 달성했을 때만 인정
+            adj_min_recovery = self.min_recovery_rate * 0.5 if self.is_aggressive else self.min_recovery_rate
+            is_v_bottom = (rsi_1m <= self.nitro_rsi_limit and is_rsi_hook and 
+                           (last_price <= bb_lower * self.nitro_bb_gap) and
+                           (actual_recovery >= adj_min_recovery))
+            
+            # [v5.4] 최종 진입 시그널 결합 (양봉 확인 추가)
+            is_entry_signal = (is_v_bottom or (micro_div and is_recovering)) and is_green_candle
+
+            if not is_entry_signal:
+                return False
+            
+            # 타점 인정을 위한 최종 보조 조건 검증
+            if not (is_rsi_hook and (is_uptrend or is_vol_spike)):
+                return False
+
+            if is_entry_signal:
                 if last_price <= bb_lower * bb_multiplier:  
-                    # ── AI 최종 승인 게이트 ─────────────────────────────────
+                    # ── v2.5 하이브리드 최종 매수 승인 게이트 ───────────────
+                    signal_type = "다이버전스" if micro_div else "V자반등"
+                    is_macro_confirmed = self.macro_states.get(code, False) # 실제 거시 신호 유무
+
                     if self.ai_engine:
                         features = self._extract_ai_features(
                             code, df_1m, df_5m,
-                            macro_div=self.macro_states.get(code, False),
-                            micro_div=True
+                            macro_div=is_macro_confirmed, # 실제 필터 상태 전달
+                            micro_div=micro_div
                         )
                         approved, prob = self.ai_engine.approve(features)
-                        prob_str = f"{prob*100:.1f}%" if prob >= 0 else "N/A(모델없음)"
+                        prob_str = f"{prob*100:.1f}%" if prob >= 0 else "N/A"
+
                         if not approved:
-                            self.logger.info(
-                                f"[{code}] 🛑 AI 기각 (확률: {prob_str}) → 이번 타점 패스"
-                            )
+                            self.logger.info(f"[{code}] [DENIED] AI 기각 ({prob_str}) -> 화면 감시는 유지합니다.")
                             return False
+                        
+                        # [핵심] 화면에는 감지 로그를 띄우되, 거시 신호가 없으면 매수하지 않음 (단, bypass_macro=True 라면 진행)
+                        if not is_macro_confirmed and not self.bypass_macro:
+                            self.logger.info(f"[{code}] [SCAN] 1분봉 {signal_type} 감지! (5분봉 하락 추세 진정 대기 중... AI:{prob_str})")
+                            return False # 실제 매수는 발생시키지 않음
+                        
+                        suffix = " + 거시 컨펌 우회" if not is_macro_confirmed else " + 5분봉 거시 컨펌 완료"
                         self.logger.warning(
-                            f"[{code}] 💥 1분봉 이중 다이버전스 + BB 하단 통과! "
-                            f"AI 승인 ({prob_str}) → 매수 실행!"
+                            f"[{code}] [SIGNAL] 1분봉 {signal_type}{suffix}! "
+                            f"AI 최종 승인 ({prob_str}) -> 매수 실행!"
                         )
                     else:
-                        self.logger.warning(f"[{code}] 💥 1분봉 이중 다이버전스 + BB 하단 통과! 매수 실행!")
-                    # ────────────────────────────────────────────────────────
+                        if not is_macro_confirmed and not self.bypass_macro:
+                            self.logger.info(f"[{code}] [SCAN] 1분봉 {signal_type} 감지! (5분봉 대기 중...)")
+                            return False
+                        
+                        suffix = " + 거시 우회" if not is_macro_confirmed else " + 5분봉 거시 컨펌"
+                        self.logger.warning(f"[{code}] [SIGNAL] 1분봉 이중 다이버전스{suffix}! 매수 실행!")
+                    
                     self.macro_states[code] = False
+                    self.signal_cooldowns[code] = now_ts
                     return True
                 else:
-                    self.logger.info(f"[{code}] ⚠️ 1분봉 다이버전스는 형성되었으나, 주가({last_price:,})가 BB하단({bb_lower:,.1f}) 대비 너무 많이 반등했습니다.")
+                    self.logger.info(f"[{code}] [LIMIT] 1분봉 다이버전스는 형성되었으나, 주가({last_price:,})가 BB하단({bb_lower:,.1f}) 대비 너무 많이 반등했습니다.")
             else:
-                self.logger.info(f"[{code}] ⏳ 아직 1분봉상 '이중 바닥(Divergence)' 신호가 완성되지 않았습니다.")
+                self.logger.debug(f"[{code}] [WAIT] 아직 1분봉상 '이중 바닥(Divergence)' 신호가 완성되지 않았습니다.")
         return False
 
     def _get_cached_indicators(self, code, timeframe, df):
-        """데이터 변경 시에만 지표를 재계산하는 고속 캐싱 메서드"""
+        """[v5.1] 고성능 캐싱: 백테스트 시에는 이미 계산된 컬럼이 있으면 즉시 반환"""
+        if 'RSI' in df.columns and 'BB_Lower' in df.columns:
+            return df
+            
         current_last_idx = df.index[-1]
         cache_key = (code, timeframe)
         
@@ -268,7 +357,7 @@ class StefanoStrategy:
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """핵심 지표 연산 (RSI, VO, BB)"""
         df = df.copy()
-        rsi_period = int(os.getenv("INDICATOR_RSI_PERIOD", "14"))
+        rsi_period = int(os.getenv("INDICATOR_RSI_PERIOD", "12"))
         
         if getattr(self, 'is_aggressive', False):
             rsi_period = 9  # 공격적 모드: RSI 기간 축소로 민감도 극대화
@@ -301,40 +390,52 @@ class StefanoStrategy:
             
         return df.fillna(0)
 
-    def _check_bullish_divergence(self, df: pd.DataFrame, window=60, strict=True):
+    def _check_bullish_divergence(self, df: pd.DataFrame, window=60, strict=True, distance=2):
         """
-        주가 하락 (새로운 저점 갱신) vs RSI 상승 (저점이 높아짐)
-        scipy.signal.find_peaks를 사용해 저점을 판별합니다.
+        [v5.0 개편] 멀티 포인트 다이버전스 탐지 알고리즘
+        가장 최근 저점을 기준으로 이전 윈도우 내 모든 저점들과 비교하여 하나라도 다이버전스가 맞으면 승인
         """
-        # 최근 윈도우 만큼 샘플링
         df_recent = df.iloc[-window:]
-        if len(df_recent) < 20:
-            return False
+        if len(df_recent) < 20: return False
 
         prices = df_recent['close'].values
         rsis = df_recent['RSI'].values
+        valleys = self._find_valleys(prices, distance=distance)
 
-        # 저점(Trough) 탐지 - 가격 배열에서만 추출 (RSI는 가격의 저점 시점을 기준으로 동기화 비교)
-        price_valleys = _find_valleys(prices, distance=3)
+        if len(valleys) < 2: return False
 
-        # 찾은 저점이 2개 이상 있어야 다이버전스 비교 가능
-        if len(price_valleys) >= 2:
-            # 최근 두 개의 저점 인덱스 추출
-            curr_p_idx = price_valleys[-1]
-            prev_p_idx = price_valleys[-2]
+        # 최신 저점 정보
+        curr_idx = valleys[-1]
+        curr_price = prices[curr_idx]
+        curr_rsi = rsis[curr_idx]
+        
+        # 다이버전스 타점 인정 RSI 한도 (캐싱된 변수 사용)
+        rsi_limit = self.rsi_limit
 
-            price_falling = prices[curr_p_idx] < prices[prev_p_idx]
+        # 이전 저점들을 순회하며 다이버전스 탐색 (최근 것부터 역순)
+        for i in range(len(valleys)-2, -1, -1):
+            prev_idx = valleys[i]
+            prev_price = prices[prev_idx]
+            prev_rsi = rsis[prev_idx]
             
-            # 주가가 바닥을 친 정확히 '동일한 시점' 의 RSI 지표값을 비교해야 진정한 다이버전스 성립
-            rsi_rising = rsis[curr_p_idx] > rsis[prev_p_idx]
-            
-            # 다이버전스 타점 인정 RSI 한도 (공격모드 65, 일반 45)
-            rsi_strict_limit = int(os.getenv("STRATEGY_RSI_LIMIT", "65" if getattr(self, 'is_aggressive', False) else "45"))
+            # 1. 가격 하락 & RSI 상승 여부
+            price_falling = curr_price < prev_price
+            rsi_rising = curr_rsi > prev_rsi
             
             if price_falling and rsi_rising:
-                # 추가 필터 (선택적): 이전 저점 형성 시 RSI가 기준점 이하에 있었는가
-                if strict and rsis[prev_p_idx] > rsi_strict_limit:
-                    return False
-                    
+                rsi_slope = curr_rsi - prev_rsi
+                price_drop_pct = (prev_price - curr_price) / prev_price
+                
+                # Class B+ 필터 (실전형 보정)
+                is_valid_signal = rsi_slope >= 0.5 and price_drop_pct >= 0.001
+                
+                if not getattr(self, 'is_aggressive', False) and not is_valid_signal:
+                    continue # 다음 이전 저점으로 넘어가 탐색 계속
+                
+                if strict and prev_rsi > rsi_limit:
+                    continue
+
+                # 하나라도 맞으면 즉시 성공 반환
                 return True
+                
         return False

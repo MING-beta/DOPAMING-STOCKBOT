@@ -28,6 +28,9 @@ LABEL_WIN_THRESHOLD  = float(os.getenv("TRADE_TARGET_PROFIT", "0.04"))
 # 실패 기준 손실률 (예: -0.02 = -2%)
 LABEL_LOSE_THRESHOLD = float(os.getenv("TRADE_STOP_LOSS", "-0.02"))
 
+# [수정] 전체 시스템 공통 거래 마찰 비용(Friction) 로드
+TRADING_FRICTION = float(os.getenv("TRADING_FRICTION", "0.0025"))
+
 # [최적화] update_labels()의 DB I/O 최소화: 종목당 최소 이 시간(초)에 한 번만 실제 쿼리 실행
 LABEL_UPDATE_INTERVAL = 30.0
 
@@ -202,9 +205,9 @@ class DataCollector:
                 except (ValueError, TypeError):
                     continue
 
-                # [수정] 실질 수익률 계산 (제비용 약 0.25% 차감)
+                # [수정] 실질 수익률 계산 (하드코딩 제거: 전역 설정된 Friction 차감)
                 gross_pct = (current_price - entry_price) / entry_price
-                net_pct = gross_pct - 0.0025
+                net_pct = gross_pct - TRADING_FRICTION
 
                 # 익절 조건 달성 → 성공(1)
                 if net_pct >= LABEL_WIN_THRESHOLD:

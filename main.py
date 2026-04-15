@@ -114,6 +114,7 @@ def main():
             # 실시간 수신 등록 (FID: 10-현재가, 15-거래량, 20-체결시간)
             kiwoom.set_real_reg("1000", existing_positions, "10;15;20", "1")
             for code in existing_positions:
+                kiwoom.get_master_code_name(code) # [성능 최적화] 보유 종목명 선제적 캐싱
                 kiwoom.request_opt10080(code)
                 logger.debug(f"[{code}] 보유 종목 실시간/차트 싱크 등록 완료")
         
@@ -142,31 +143,34 @@ def main():
             if now.hour < 9 or (now.hour >= 15 and now.minute > 30) or now.hour >= 16:
                 return
 
-            # 1. 포지션 모니터링 및 미체결 감시 (메인 UI 스레드에서 안전하게 처리)
-            execution_manager.monitor_positions(pipeline)
-            execution_manager.monitor_pending_orders()
-            
-            # 2. 신규 진입 매수 시그널 탐색 (백그라운드 스레드 위임)
+            # 2. 매매 로직 집행 (백그라운드 스레드 위임)
             if not execution_manager.is_risk_halt and not is_analyzing:
-                def background_analysis():
+                def background_worker():
                     nonlocal is_analyzing
                     is_analyzing = True
                     try:
+                        # [P1] 포지션 모니터링 및 미체결 감시 (백그라운드 위임하여 UI 랙 방지)
+                        execution_manager.monitor_positions(pipeline)
+                        execution_manager.monitor_pending_orders()
+                        
+                        # [P2] 신규 진입 매수 시그널 탐색 (배치 데이터 활용)
                         with pipeline.lock:
                             codes = list(pipeline.data_1m.keys())
                         
-                        for code in codes:
-                            df_1m, df_5m = pipeline.get_data(code)
+                        # 일괄 데이터 획득 (락 점유 시간 최소화)
+                        all_data = pipeline.batch_get_data(codes)
+                        
+                        for code, (df_1m, df_5m) in all_data.items():
                             if strategy.analyze(code, df_1m, df_5m):
                                 # 매수 실행 (내부적으로 Throttler 큐를 사용하므로 스레드 안전)
                                 execution_manager.execute_buy(code, pipeline)
                     except Exception as e:
-                        logger.error(f"⚠️ [전략 분석 스레드] 예외 발생: {e}")
+                        logger.error(f"⚠️ [백그라운드 워커] 예외 발생: {e}")
                     finally:
                         is_analyzing = False
 
-                # 백그라운드 워커에게 전체 종목 분석 작업 할당
-                executor_pool.submit(background_analysis)
+                # 백그라운드 워커 실행
+                executor_pool.submit(background_worker)
                     
         timer = QTimer()
         timer.timeout.connect(evaluate_strategy_and_positions)
@@ -246,8 +250,9 @@ def main():
                 slack.send_message(open_msg)
                 notification_flags["market_open"] = True
                 
-            elif now_str == "15:30" and not notification_flags["market_close"]:
+            elif now_str >= "15:30" and not notification_flags["market_close"]:
                 # [장 종료 클리닝] 미체결 및 요청 큐 강제 정리
+                logger.info("🏁 15:30 장 종료 감지. 일일 리포트 생성을 시작합니다.")
                 kiwoom.throttler.clear_queue()
                 execution_manager.clear_pending_orders()
 
@@ -263,9 +268,9 @@ def main():
                 # [고도화] 서버 공식 실현손익 데이터 반영
                 if kiwoom.official_daily_pnl != 0:
                     summary['realized_pnl'] = kiwoom.official_daily_pnl
-                    self.logger.info(f"✅ 리포트 생성 시 서버 공식 수익금({kiwoom.official_daily_pnl:,}원)을 적용합니다.")
+                    logger.info(f"✅ 리포트 생성 시 서버 공식 수익금({kiwoom.official_daily_pnl:,}원)을 적용합니다.")
                 else:
-                    self.logger.warning("⚠️ 서버 공식 실현손익 데이터가 없어 DB 추정치를 사용합니다.")
+                    logger.warning("⚠️ 서버 공식 실현손익 데이터가 없어 DB 추정치를 사용합니다.")
 
                 # 리포트 생성
                 report_msg = ReportGenerator.generate_markdown_report(

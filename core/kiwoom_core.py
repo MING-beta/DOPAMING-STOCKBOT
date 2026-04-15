@@ -42,6 +42,10 @@ class KiwoomCore(QAxWidget):
         self.login_event_loop = None
         # 현재 실시간 감시 중인 종목 데이터: { 종목코드: 감시시작타임스탬프 }
         self.monitored_codes = {}
+        # [신규] 상한가 도달 등으로 감시에서 영구 제외된 종목들
+        self.blacklisted_codes = set()
+        # [성능 최적화] 종목명 캐시: { 종목코드: 종목명 }
+        self.code_names = {}
         # 초기 총 자산 (리스크 가드 기준점)
         self.initial_total_assets = 0
         
@@ -229,3 +233,33 @@ class KiwoomCore(QAxWidget):
         """실시간(Real) 수신 등록 해제 (조건 이탈 종목)"""
         self.logger.info(f"SetRealRemove 요청: {code}")
         self.dynamicCall("SetRealRemove(QString, QString)", screen_no, code)
+    def get_master_code_name(self, code):
+        """
+        [성능 최적화] 종목명을 조회하고 캐시에 저장합니다.
+        API 누락 종목의 경우 수동 매핑 테이블을 우선 참조합니다.
+        """
+        if not code: return ""
+        
+        # 코드 클리닝 (A 제거 및 6자리 패딩) - 매핑 비교 전에 수행
+        clean_code = code.replace("A", "").strip().zfill(6)
+        
+        # [수동 등록] API가 가져오지 못하는 종목명 직접 관리 (전처리된 코드 기준)
+        manual_names = {
+            "493280": "아이엠비오로직스",
+            "478340": "나라스페이스테크놀로지",
+            "445680": "큐리옥스바이오시스템즈",
+            "394280": "오픈엣지테크놀로지"
+        }
+        
+        if clean_code in manual_names:
+            return manual_names[clean_code]
+
+        if code in self.code_names and self.code_names[code]:
+            return self.code_names[code]
+        
+        name = self.dynamicCall("GetMasterCodeName(QString)", clean_code)
+        
+        if name and name.strip():
+            self.code_names[code] = name.strip()
+            return self.code_names[code]
+        return ""

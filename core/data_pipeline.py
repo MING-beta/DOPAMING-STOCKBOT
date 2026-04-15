@@ -76,20 +76,28 @@ class DataPipeline:
         self.logger.info("파이프라인 지표 연산 콜백 등록 완료")
 
     def get_data(self, code):
-        """
-        전략 로직(StefanoStrategy 등)이나 외부 모듈에서 1분/5분봉 데이터를 안전하게 읽기 위해 사용합니다.
-        스레드 락(Lock)을 걸어 데이터 복사본(copy)을 반환하므로 읽기 도중 수정되는 것을 방지합니다.
-        
-        Args:
-            code (str): 조회할 종목코드
-            
-        Returns:
-            tuple(pd.DataFrame, pd.DataFrame): 1분봉 데이터프레임, 5분봉 데이터프레임의 깊은 복사본
-        """
+        """단일 종목 데이터를 안전하게 읽어옵니다. (Thread-Safe)"""
         with self.lock:
             df_1m = self.data_1m.get(code, pd.DataFrame()).copy()
             df_5m = self.data_5m.get(code, pd.DataFrame()).copy()
         return df_1m, df_5m
+
+    def batch_get_data(self, codes):
+        """
+        [성능 최적화] 여러 종목의 데이터를 한 번의 락(Lock) 획득으로 일괄 반환합니다.
+        대시보드와 같이 대량의 데이터를 순회하며 읽어야 할 때 UI 랙을 획기적으로 줄여줍니다.
+        """
+        results = {}
+        with self.lock:
+            for code in codes:
+                # 데이터가 존재할 때만 카피본 생성하여 오버헤드 최소화
+                df_1m = self.data_1m.get(code)
+                df_5m = self.data_5m.get(code)
+                results[code] = (
+                    df_1m.copy() if df_1m is not None else pd.DataFrame(),
+                    df_5m.copy() if df_5m is not None else pd.DataFrame()
+                )
+        return results
 
     def _worker_loop(self):
         """백그라운드에서 주기적으로 큐를 비우며 DataFrame을 업데이트/리샘플링"""

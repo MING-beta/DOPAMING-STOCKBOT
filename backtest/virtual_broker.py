@@ -5,13 +5,14 @@ class VirtualBroker:
     백테스팅용 가상 브로커. 
     현금 잔고, 보유 종목, 수수료 및 세금 시뮬레이션을 담당합니다.
     """
-    def __init__(self, initial_balance=10000000, fee_rate=0.00015, tax_rate=0.002, slippage=0.0005):
+    def __init__(self, initial_balance=10000000, fee_rate=0.00015, tax_rate=0.002, slippage=0.00015):
         """
         Args:
-            initial_balance (int): 초기 자본금 (기본 1,000만원)
-            fee_rate (float): 매수/매도 수수료율 (기본 0.015%)
-            tax_rate (float): 매도 시 세금 (기본 0.2% - 시장에 따라 다를 수 있음)
-            slippage (float): 슬리피지 비율 (기본 0.05%)
+            initial_balance (int): 초기 자본금
+            fee_rate (float): 매수/매도 각각의 수수료율 (기본 0.015% -> 왕복 0.03%)
+            tax_rate (float): 매도 시 세금 (기본 0.2%)
+            slippage (float): 슬리피지 비율 (기본 0.015% -> 왕복 0.03%)
+            # 총 제비용(Friction)은 .env의 TRADING_FRICTION 설정에 따라 run_backtest.py에서 조정됨
         """
         self.logger = logging.getLogger("DopamingBot.Backtest.VirtualBroker")
         self.balance = initial_balance
@@ -57,14 +58,19 @@ class VirtualBroker:
             new_qty = old_qty + qty
             self.positions[code]['buy_price'] = ((old_price * old_qty) + (execution_price * qty)) / new_qty
             self.positions[code]['qty'] = new_qty
+            # 추가 매수 시에도 최초 진입 시간을 기준으로 타임컷을 계산하기 위해 buy_time은 업데이트하지 않음
         else:
-            self.positions[code] = {'buy_price': execution_price, 'qty': qty}
+            self.positions[code] = {'buy_price': execution_price, 'qty': qty, 'buy_time': dt}
             
         self.order_history.append({
             'time': dt, 'code': code, 'type': 'BUY', 
             'price': price, 'exec_price': execution_price, 
             'qty': qty, 'fee': fee, 'tax': 0
         })
+        
+        # [v3.4] 매수 로그 기록
+        self._log_trade_to_file(dt, code, 'BUY', execution_price, qty)
+        
         return True
 
     def sell(self, code, price, qty, dt):
@@ -101,7 +107,32 @@ class VirtualBroker:
             'price': price, 'exec_price': execution_price, 
             'qty': qty, 'fee': fee, 'tax': tax, 'pnl': pnl
         })
+        
+        # [v3.4] 매도 로그 기록 (수익률 포함)
+        self._log_trade_to_file(dt, code, 'SELL', execution_price, qty, pnl)
+        
         return True
+
+    def _log_trade_to_file(self, dt, code, type, price, qty, pnl=0):
+        """매매 내역을 파일로 저장하여 정밀 분석 지원"""
+        import os
+        filename = "backtest_trades.csv"
+        file_exists = os.path.isfile(filename)
+        
+        try:
+            with open(filename, 'a', encoding='utf-8-sig') as f:
+                if not file_exists:
+                    f.write("Time,Code,Type,Price,Qty,PnL,ProfitRate(%)\n")
+                
+                pnl_rate = 0
+                if type == 'SELL':
+                    # 매도 가격에서 주당 수익금을 빼서 매수 단가 역산 (수익률 추정용)
+                    buy_price = price - (pnl / qty) if qty > 0 else 0
+                    pnl_rate = (pnl / (buy_price * qty)) * 100 if buy_price > 0 else 0
+                
+                f.write(f"{dt},{code},{type},{price:.1f},{qty},{pnl:.1f},{pnl_rate:.2f}\n")
+        except Exception as e:
+            self.logger.error(f"Failed to log trade to file: {e}")
 
     def get_total_asset_value(self, current_prices):
         """현재 가치 기준 총 자산 산출 (현금 + 주식 평가액)"""
@@ -125,7 +156,8 @@ class VirtualBroker:
     def get_summary(self):
         # Profit Factor 계산
         profit_factor = self.total_profit / self.total_loss if self.total_loss > 0 else (999.0 if self.total_profit > 0 else 0)
-        win_rate = (self.win_count / (self.win_count + self.loss_count) * 100) if (self.win_count + self.loss_count) > 0 else 0
+        completed_trades = self.win_count + self.loss_count
+        win_rate = (self.win_count / completed_trades * 100) if completed_trades > 0 else 0
 
         return {
             "initial_balance": self.initial_balance,
@@ -133,6 +165,7 @@ class VirtualBroker:
             "total_fees": self.total_fees,
             "total_taxes": self.total_taxes,
             "order_count": len(self.order_history),
+            "completed_trades": completed_trades,
             "win_rate": win_rate,
             "win_count": self.win_count,
             "loss_count": self.loss_count,

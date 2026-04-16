@@ -43,6 +43,12 @@ class ExecutionManager:
         self.BREAKEVEN_TRIGGER = float(os.getenv("TRADE_BREAKEVEN_TRIGGER", "0.01"))
         self.BREAKEVEN_PROTECT = float(os.getenv("TRADE_BREAKEVEN_PROTECT", "0.003"))
         
+        # [v11.1] 오버나잇 (종가 홀딩) 조건 수익률 
+        self.OVERNIGHT_HOLD_THRESHOLD = float(os.getenv("OVERNIGHT_HOLD_PROFIT", "3.0"))
+        
+        # [v11.1] 오버나잇 하단 방어선 (이 수치 밑으로 떨어지면 투매)
+        self.OVERNIGHT_DROP_LIMIT = float(os.getenv("OVERNIGHT_DROP_LIMIT", "-1.0"))
+        
         # [공격적 투자 모드] 스캘핑 최적화를 위한 가중치 조정
         is_aggressive = os.getenv("AGGRESSIVE_MODE", "False").lower() == 'true'
         if is_aggressive:
@@ -116,10 +122,17 @@ class ExecutionManager:
         current_price = int(df_1m['close'].iloc[-1])
         if current_price <= 0: return
 
-        # 2. 목표 투자금액 산출 (환경변수 비중 적용)
+        # 2. [복리 투자 엔진] 목표 투자금액 산출 (수익금 눈덩이 반영)
         invest_rate = self.INVEST_RATE_PER_STOCK
-        base_assets = max(self.kiwoom.initial_total_assets, self.kiwoom.available_cash)
         
+        # 기본 자산(아침 예수금)에 오늘 벌어들인 누적 수익금(실현손익)을 플러긴하여 스노우볼 확장
+        official_pnl = getattr(self.kiwoom, 'official_daily_pnl', self.daily_pnl)
+        base_assets = self.kiwoom.initial_total_assets + official_pnl
+        
+        # 자산이 비정상일 경우 하한 방어 로직
+        if base_assets <= 0:
+            base_assets = max(self.kiwoom.initial_total_assets, self.kiwoom.available_cash)
+            
         target_budget = base_assets * invest_rate
         qty = int(target_budget / current_price)
         
@@ -492,3 +505,55 @@ class ExecutionManager:
             self.pending_orders.clear()
             if count > 0:
                 self.logger.info(f"🗑️ [미체결 정리] 장 종료로 인해 {count}개의 미체결 추적을 중단했습니다.")
+
+    def smart_liquidate_positions(self, pipeline):
+        """
+        [15:19 오버나잇 방지] 현재 가지고 있는 포지션 중,
+        수익률이 OVERNIGHT_HOLD_THRESHOLD (예: +3.0%) 미만인 종목만 강제 시장가 청산합니다.
+        강력한 매수세(상한가 등)가 있는 종목은 내일 상승을 기대하며 예외적으로 홀딩합니다.
+        """
+        liquidated_count = 0
+        held_count = 0
+        
+        with self.lock:
+            # 안전한 순회를 위해 리스트 백업
+            codes_to_check = list(self.positions.keys())
+            
+        for code in codes_to_check:
+            # 1. 포지션 데이터 조회
+            with self.lock:
+                if code not in self.positions:
+                    continue
+                pos_data = self.positions[code]
+                
+            buy_price = pos_data['buy_price']
+            
+            # 2. 현재가 및 수익률 조회
+            df_1m, _ = pipeline.get_data(code)
+            if df_1m is not None and not df_1m.empty:
+                current_price = df_1m['close'].iloc[-1]
+            else:
+                current_price = buy_price
+                
+            friction_pct = self.TRADING_FRICTION * 100.0
+            profit_rate = (((current_price - buy_price) / buy_price) * 100.0) - friction_pct
+            
+            # [API 공식 수익률 덮어쓰기]
+            if 'api_profit_rate' in pos_data and not getattr(self.kiwoom, 'is_mock', False):
+                profit_rate = pos_data['api_profit_rate']
+                
+            # 3. 오버나잇 (마감 홀딩) 3단계 분류 판단
+            if profit_rate >= self.OVERNIGHT_HOLD_THRESHOLD:
+                self.logger.warning(f"💎 [초강세 홀딩] {code} - 현재 수익률 {profit_rate:+.2f}%(기대 상회). 강력한 모멘텀 감지로 내일까지 홀딩합니다!")
+                held_count += 1
+            elif profit_rate > self.OVERNIGHT_DROP_LIMIT:
+                self.logger.info(f"💤 [보합권 연장] {code} - 현재 수익률 {profit_rate:+.2f}%. 세금(-0.25%) 절약 및 내일 슈팅 기대를 위해 하루 더 지켜봅니다.")
+                held_count += 1
+            else:
+                self.logger.critical(f"💣 [위험군 투매] {code} - 현재 수익률 {profit_rate:+.2f}%. 하단 방어선({self.OVERNIGHT_DROP_LIMIT}%) 이탈! 추가 폭락 리스크 차단용 시장가 투매.")
+                self.execute_sell(code, pipeline, sell_type="강제정리")
+                liquidated_count += 1
+                
+        # 리포팅
+        msg = f"🚨 *[15:19 오버나잇 3단계 검문 결과]*\n- 💣 위험군 도태 (시장가 컷): {liquidated_count}개 종목\n- 💎/💤 생존 승인 (오버나잇): {held_count}개 종목"
+        self.slack.send_message(msg)

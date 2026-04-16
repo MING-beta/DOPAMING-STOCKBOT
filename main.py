@@ -251,6 +251,13 @@ def main():
                 slack.send_message(open_msg)
                 notification_flags["market_open"] = True
                 
+            elif now_str == "15:19" and not notification_flags.get("market_liquidation"):
+                # [스마트 일괄 청산] 장 마감 동시호가(15:20) 직전인 15:19에 
+                # 수익률 저하 종목만 추려내어 안전하게 시장가 청산 및 오버나잇 회피.
+                logger.warning("🚨 [오버나잇 방지] 15:19 정규장 마감 1분 전! 스마트 청산 개시!")
+                execution_manager.smart_liquidate_positions(pipeline)
+                notification_flags["market_liquidation"] = True
+                
             elif now_str >= "15:30" and not notification_flags["market_close"]:
                 # [장 종료 클리닝] 미체결 및 요청 큐 강제 정리
                 logger.info("🏁 15:30 장 종료 감지. 일일 리포트 생성을 시작합니다.")
@@ -292,6 +299,7 @@ def main():
             elif now_str == "00:00":
                 notification_flags["market_open"] = False
                 notification_flags["market_close"] = False
+                notification_flags["market_liquidation"] = False
                 
         health_timer = QTimer()
         health_timer.timeout.connect(health_check)

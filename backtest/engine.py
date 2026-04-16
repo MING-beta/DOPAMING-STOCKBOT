@@ -70,9 +70,16 @@ class BacktestEngine:
                 # [v6.0] 보유 시간 계산을 상단으로 이동하여 모든 청산 로직에서 사용 가능하게 함
                 hold_duration = (current_time - pos['buy_time']).total_seconds() / 60
                 
-                # [v5.7 수정보강] 수수료 중복 차감 방지를 위해 순수 가격 변동률(Gross)로 판정 로직 일원화
-                # 가상 브로커가 실제 자산 차감을 담당하므로 지표는 가격 기반으로 측정합니다.
-                profit_rate = (current_price - buy_price) / buy_price
+                # [Intra-Bar 3D 스캐닝] 분봉 내 고/저가를 활용한 엄격한 수익률 판별 (생존 편향/Look-ahead Bias 제거)
+                current_low = df_1m['low'].iloc[i]
+                current_high = df_1m['high'].iloc[i]
+                
+                profit_rate_close = (current_price - buy_price) / buy_price
+                profit_rate_low = (current_low - buy_price) / buy_price
+                profit_rate_high = (current_high - buy_price) / buy_price
+                
+                # 종가 기준 보조 지표
+                profit_rate = profit_rate_close
                 
                 # [로깅 최적화] 보유 시 실시간 수익률 기록 생략
                 # self.logger.debug(f"   >> ROI:{profit_rate*100:.2f}% | High:{high_price:,.0f} | BreakEven:{reached_breakeven}")
@@ -90,15 +97,31 @@ class BacktestEngine:
                     current_trailing_activation = trailing_activation_rate
                     current_trailing_callback = trailing_callback
 
-                # 최고가 갱신 (트레일링용)
-                if current_price > high_price:
-                    high_price = current_price
+                # 최고가 갱신 (인트라바 고점 기준 트레일링)
+                if current_high > high_price:
+                    high_price = current_high
                 
-                # A. 익절 판별
-                if profit_rate >= current_target:
+                # [0순위 방어] 최악(Worst-Case) 손절 판별 - 꼬리를 내리꽂아 손절선을 건드렸는가?
+                applied_stop_limit = 0.010 if reached_breakeven else current_stop_limit
+                if profit_rate_low <= applied_stop_limit:
+                    stop_execution_price = buy_price * (1.0 + applied_stop_limit)
                     next_open = df_1m['open'].iloc[i+1]
-                    self.logger.info(f"[{code}] [SELL] 익절 목표 도달 ({signal}): {profit_rate*100:.2f}%")
-                    self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
+                    # 시가가 이미 손절선을 뚫고 갭락했다면 시가 체결, 아니면 손절선 체결 (보수적)
+                    execution_price = min(stop_execution_price, next_open)
+                    
+                    self.logger.info(f"[{code}] [SELL] 강제 손절선 터치 ({signal}) - 저가 마진: {profit_rate_low*100:.2f}% (Limit: {applied_stop_limit*100:.2f}%)")
+                    self.broker.sell(code, execution_price, pos['qty'], df_1m.index[i+1])
+                    reached_breakeven = False
+                    trailing_activated = False
+                    continue
+                
+                # A. 익절 판별 (인트라바 고점 터치 기준)
+                if profit_rate_high >= current_target:
+                    target_execution_price = buy_price * (1.0 + current_target)
+                    next_open = df_1m['open'].iloc[i+1]
+                    execution_price = max(target_execution_price, next_open)
+                    self.logger.info(f"[{code}] [SELL] 목표 익절가 달성 ({signal}) - 고가 마진: {profit_rate_high*100:.2f}%")
+                    self.broker.sell(code, execution_price, pos['qty'], df_1m.index[i+1])
                     reached_breakeven = False
                     trailing_activated = False
                     continue
@@ -132,18 +155,20 @@ class BacktestEngine:
                     reached_breakeven = True
                     self.logger.debug(f"[{code}] [SHIELD] 본절가 보호 시작 (+{self.breakeven_trigger*100:.1f}% 도달)")
                 
-                if not trailing_activated and profit_rate >= current_trailing_activation:
+                # [트레일링 활성화] 고점(High)이 트리거를 건드렸는가?
+                if not trailing_activated and profit_rate_high >= current_trailing_activation:
                     trailing_activated = True
                     self.logger.debug(f"[{code}] [TRAILING] 추적 익절 활성화 (+{current_trailing_activation*100:.1f}% 도달)")
                 
-                # D. 트레일링 스탑 청산 판별
+                # D. 트레일링 스탑 청산 판별 (저가가 트레일링 방어선을 깼는가?)
                 if trailing_activated:
                     trailing_stop_price = high_price * (1.0 - current_trailing_callback)
-                    if current_price <= trailing_stop_price:
+                    if current_low <= trailing_stop_price:
                         next_open = df_1m['open'].iloc[i+1]
-                        real_price_profit = (next_open - buy_price) / buy_price
-                        self.logger.info(f"[{code}] [SELL] [TRAILING] 고점({high_price:,.0f}) 대비 하락 청산 ({signal}, 변동률: {real_price_profit*100:.2f}%)")
-                        self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
+                        execution_price = min(trailing_stop_price, next_open)
+                        real_price_profit = (execution_price - buy_price) / buy_price
+                        self.logger.info(f"[{code}] [SELL] [TRAILING] 트레일링 이탈 청산 ({signal}, 체결수익: {real_price_profit*100:.2f}%)")
+                        self.broker.sell(code, execution_price, pos['qty'], df_1m.index[i+1])
                         reached_breakeven = False
                         trailing_activated = False
                         continue
@@ -169,15 +194,7 @@ class BacktestEngine:
                     trailing_activated = False
                     continue
 
-                # G. 손절/본절가 청산 판별 (v6.0: 본절 시 수수료 포함 +0.1% Net 수익 구간 보호)
-                applied_stop_limit = 0.010 if reached_breakeven else current_stop_limit
-                if profit_rate <= applied_stop_limit:
-                    next_open = df_1m['open'].iloc[i+1]
-                    self.logger.info(f"[{code}] [SELL] 손절/본절가 도달 ({signal}): {profit_rate*100:.2f}% (Limit: {applied_stop_limit*100:.2f}%)")
-                    self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
-                    reached_breakeven = False
-                    trailing_activated = False
-                    continue
+                # G. 기존 손절 청산 로직은 최상단(0순위 방어)으로 위치를 이동하여 Look-ahead 오류 원천차단함 
             else:
                 reached_breakeven = False
                 trailing_activated = False

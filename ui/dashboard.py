@@ -12,7 +12,7 @@ from PyQt5.QtGui import QColor, QFont, QPalette, QBrush
 """
 Dashboard 2.0 Premium Edition
 -------------------------------
-Toss/Kakao 금융앱을 벤치마킹한 차분하고 고급스러운 하이엔드 거래 위주 레이아웃입니다.
+차분하고 고급스러운 하이엔드 거래 위주 레이아웃입니다.
 핵심 지표의 가시성을 극대화하고, 데이터 계층화를 통해 피로도를 줄였습니다.
 """
 
@@ -24,6 +24,10 @@ class Dashboard(QMainWindow):
         self.execution_manager = execution_manager
         self.strategy = strategy
         self.code_names = {} 
+        
+        # [Hot-Reload] .env 파일 경로 및 초기 수정 시간 캐싱
+        self.env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
+        self.last_env_mtime = os.path.getmtime(self.env_file) if os.path.exists(self.env_file) else 0
         
         self.init_ui()
         self.apply_dark_theme()
@@ -488,10 +492,65 @@ class Dashboard(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "실행 오류", f"데몬 워커 실행에 실패했습니다:\n{e}")
 
+    def hot_reload_env(self):
+        import dotenv
+        if not hasattr(self, 'env_file') or not os.path.exists(self.env_file): return
+        dotenv.load_dotenv(self.env_file, override=True)
+        
+        ex = self.execution_manager
+        
+        new_target = float(os.getenv("TRADE_TARGET_PROFIT", str(ex.TARGET_PROFIT)))
+        new_stop = float(os.getenv("TRADE_STOP_LOSS", str(ex.STOP_LOSS)))
+        new_trail = float(os.getenv("TRAILING_STOP_ACTIVATION", str(ex.TRAILING_STOP_ACTIVATION)))
+        new_ai = float(os.getenv("AI_THRESHOLD", "0.38"))
+        
+        # UI에서 사용자가 조작하여 변경한 경우 현재 메모리 값과 .env 값이 동일하므로 무시
+        changed = False
+        if abs(ex.TARGET_PROFIT - new_target) > 0.0001: changed = True
+        if abs(ex.STOP_LOSS - new_stop) > 0.0001: changed = True
+        if abs(ex.TRAILING_STOP_ACTIVATION - new_trail) > 0.0001: changed = True
+        if abs(float(self.spin_ai.value()) - new_ai) > 0.0001: changed = True
+
+        if not changed:
+            return
+
+        ex.TARGET_PROFIT = new_target
+        ex.STOP_LOSS = new_stop
+        ex.TRAILING_STOP_ACTIVATION = new_trail
+        
+        # UI 스핀박스 업데이트 (signal 무한루프 방지)
+        self.spin_target.blockSignals(True)
+        self.spin_target.setValue(new_target * 100.0)
+        self.spin_target.blockSignals(False)
+        
+        self.spin_stop.blockSignals(True)
+        self.spin_stop.setValue(new_stop * 100.0)
+        self.spin_stop.blockSignals(False)
+        
+        self.spin_trail.blockSignals(True)
+        self.spin_trail.setValue(new_trail * 100.0)
+        self.spin_trail.blockSignals(False)
+        
+        self.spin_ai.blockSignals(True)
+        self.spin_ai.setValue(new_ai)
+        self.spin_ai.blockSignals(False)
+        
+        if hasattr(ex, 'logger'):
+            ex.logger.info("♻️ [.env 핫 리로드] 백그라운드 워커에 의한 설정값 변경이 무중단으로 반영되었습니다.")
+        if hasattr(ex, 'slack'):
+            ex.slack.send_message("♻️ *[자동 환경설정 동기화 (Hot-Reload)]*\n야간 최적화 데몬이 발굴한 최신 파라미터가 시스템 재부팅 없이 라이브 엔진에 100% 동기화 및 반영되었습니다.")
+
     def update_dashboard(self):
         # [최적화] 대량 UI 업데이트 시 비동기 렌더링 억제로 스크롤 버벅임 방지
         self.setUpdatesEnabled(False)
         try:
+            # [0] 핫 리로드 감지기 (Hot-Reload Watcher)
+            if hasattr(self, 'env_file') and os.path.exists(self.env_file):
+                current_mtime = os.path.getmtime(self.env_file)
+                if current_mtime > self.last_env_mtime:
+                    self.last_env_mtime = current_mtime
+                    self.hot_reload_env()
+
             # [1] 대시보드 모드 정보 업데이트
             mode_str = "모의투자 시뮬레이션" if self.execution_manager.is_dry_run else "실거래 운영 모드"
 

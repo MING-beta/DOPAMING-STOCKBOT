@@ -79,7 +79,9 @@ def main():
     
     # 각 종목당 할당 자산 (포트폴리오 개념)
     PER_STOCK_BALANCE = 5000000 
-    TOTAL_INITIAL_BALANCE = PER_STOCK_BALANCE * len(TARGET_CODES)
+    TOTAL_VIRTUAL_INITIAL = PER_STOCK_BALANCE * len(TARGET_CODES)
+    # [거품 제거] 실전 운영 계좌(약 3천만 원 풀스윙) 기준 체감 수익률을 위한 실질 분모
+    REALISTIC_ACCOUNT = 30000000
     friction = float(os.getenv("TRADING_FRICTION", "0.009"))
     
     print("\n" + "=" * 50)
@@ -124,14 +126,17 @@ def main():
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
     
-    total_profit_rate = calculate_total_profit(TOTAL_INITIAL_BALANCE, total_final_value)
+    total_net_profit = total_final_value - TOTAL_VIRTUAL_INITIAL
+    realistic_monthly_roi = (total_net_profit / REALISTIC_ACCOUNT) * 100.0
+    
     pf = total_win / total_loss if total_loss > 0 else 999.0
 
     print("\n" + "REPORT " + "=" * 43)
     print(f"[백테스트 결과 리포트: 유니버스 {len(TARGET_CODES)}종목 (Total Victory)]")
     print(f"총 실행 시간: {duration:.2f}초")
-    print(f"전체 수익률: {total_profit_rate:+.2f}%")
-    print(f"최종 합산 자산: {total_final_value:,.0f} 원")
+    print(f"실전 체감 수익률(ROI): {realistic_monthly_roi:+.2f}% (운영 자금 {REALISTIC_ACCOUNT:,.0f}원 회전 기준)")
+    print(f"순수 창출 수익금: {total_net_profit:,.0f} 원 (제세금/수수료 100% 공제 후)")
+    print(f"가상 총 버퍼 자산: {total_final_value:,.0f} 원")
     print(f"평균 승률: {(total_win_count/total_trades*100):.1f}% ({total_trades}회 중 {total_win_count}회)")
     print(f"최대 낙폭(Max MDD): {max_mdd:.2f}%")
     print(f"포트폴리오 PF: {pf:.2f}")

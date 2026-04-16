@@ -293,27 +293,27 @@ class StefanoStrategy:
         vol_mean = df['volume'].iloc[-20:-1].mean()
         vol_ratio = last['volume'] / vol_mean if vol_mean > 0 else 1.0
         
-        # [v9.4.1 Optimal] 수급 문턱 미세 조정 (6.5배) + 가속도 확인
+        # [v9.4.1 Optimal] 수급 문턱 미세 조정 + 가속도 확인 (하드코딩 해제하고 env 연동)
         is_accelerating = last['volume'] > prev['volume'] * 1.5
-        is_vol_spike = vol_ratio >= 6.5 and is_accelerating
+        is_vol_spike = vol_ratio >= self.vol_spike_threshold and is_accelerating
         
         # [v9.5] 완전 정배열 (Super Growth) & 가속도 증가 컨펌
         is_aligned = last['EMA20'] > last['EMA60'] > last['EMA120']
         prev_slope = df['EMA20_Slope'].iloc[-2]
         is_momentum = last['EMA20_Slope'] > 0.001 and last['EMA20_Slope'] > prev_slope
         
-        # [v9.4.1] 변동성 확장 기준 미세 보정 (1.10x)
+        # [v9.4.1] 변동성 확장 기준 진입장벽 완화 (1.05x)
         prev_width = df['BB_Width'].iloc[-2]
-        is_exploding = last['BB_Width'] > prev_width * 1.10
+        is_exploding = last['BB_Width'] > prev_width * 1.05
         
         # [v9.5] 2연속 양봉 확인 (Strength Confirmation)
         is_double_green = last['close'] > last['open'] and prev['close'] > prev['open']
         
-        # [v9.4.1] RSI 분출 구간 (62~78)
-        is_rsi_safe = 62.0 <= last['RSI'] <= 78.0
+        # [v9.4.1] RSI 분출 구간 확장 (55~82)
+        is_rsi_safe = 55.0 <= last['RSI'] <= 82.0
         
-        # [v9.4 Crown] 이평선(MA20) 지격도 확인
-        is_supported = last['close'] > last['MA20'] * 1.005
+        # [v9.4 Crown] 이평선(MA20) 지격도 조건 완화
+        is_supported = last['close'] > last['MA20'] * 1.002
         
         if price_break and is_vol_spike and is_aligned and is_rsi_safe and is_momentum and is_exploding and is_supported and is_double_green and last['close'] > last['open'] and last['VO'] > 25.0 and last['EMA120_Slope'] > 0:
             self.logger.debug(f"[BREAKOUT] v9.5 Victory 서지 감지! (RVOL:{vol_ratio:.1f}, RSI:{last['RSI']:.1f})")

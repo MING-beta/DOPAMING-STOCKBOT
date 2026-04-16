@@ -1,9 +1,10 @@
 import sys
 import os
+import dotenv
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QTextEdit, QTableWidget, QTableWidgetItem, QLabel, QHeaderView,
-    QGroupBox, QGridLayout, QFrame
+    QGroupBox, QGridLayout, QFrame, QPushButton, QDoubleSpinBox, QMessageBox
 )
 from PyQt5.QtCore import QTimer, Qt, QSize
 from PyQt5.QtGui import QColor, QFont, QPalette, QBrush
@@ -159,6 +160,49 @@ class Dashboard(QMainWindow):
             # 한 줄씩 정렬로 변경하여 가독성 증대
             
         config_vbox.addLayout(config_grid)
+        
+        # [신규] 인터랙티브 컨트롤 패널
+        control_layout = QGridLayout()
+        lbl_target = QLabel("익절가(%)")
+        lbl_target.setStyleSheet("color: #ADB5BD; font-size: 11px;")
+        self.spin_target = QDoubleSpinBox()
+        self.spin_target.setRange(0.1, 30.0)
+        self.spin_target.setSingleStep(0.1)
+        self.spin_target.setValue(self.execution_manager.TARGET_PROFIT * 100.0)
+        self.spin_target.setStyleSheet("background-color: #202124; color: #E8EAED; border: 1px solid #3C4043; border-radius: 4px; padding: 2px;")
+        self.spin_target.valueChanged.connect(self.on_target_changed)
+        
+        lbl_trail = QLabel("트레일링(%)")
+        lbl_trail.setStyleSheet("color: #ADB5BD; font-size: 11px;")
+        self.spin_trail = QDoubleSpinBox()
+        self.spin_trail.setRange(0.1, 10.0)
+        self.spin_trail.setSingleStep(0.1)
+        self.spin_trail.setValue(self.execution_manager.TRAILING_STOP_ACTIVATION * 100.0)
+        self.spin_trail.setStyleSheet("background-color: #202124; color: #E8EAED; border: 1px solid #3C4043; border-radius: 4px; padding: 2px;")
+        self.spin_trail.valueChanged.connect(self.on_trail_changed)
+        
+        control_layout.addWidget(lbl_target, 0, 0)
+        control_layout.addWidget(self.spin_target, 0, 1)
+        control_layout.addWidget(lbl_trail, 1, 0)
+        control_layout.addWidget(self.spin_trail, 1, 1)
+        config_vbox.addLayout(control_layout)
+        
+        # [신규] 패닉 버튼과 상태 뷰어
+        panic_vbox = QVBoxLayout()
+        self.lbl_panic_pnl = QLabel("보유 종목 총 손익: 계산 중...")
+        self.lbl_panic_pnl.setStyleSheet("color: #F28B82; font-size: 11px; font-weight: bold;")
+        self.lbl_panic_pnl.setAlignment(Qt.AlignCenter)
+        
+        self.btn_panic = QPushButton("🚨 긴급 투매 & 매수 중단")
+        self.btn_panic.setFixedHeight(40)
+        self.btn_panic.setStyleSheet("background-color: #D93025; color: white; border-radius: 8px; font-weight: bold; font-size: 13px;")
+        self.btn_panic.setCursor(Qt.PointingHandCursor)
+        self.btn_panic.clicked.connect(self.toggle_panic)
+        
+        panic_vbox.addWidget(self.lbl_panic_pnl)
+        panic_vbox.addWidget(self.btn_panic)
+        config_vbox.addLayout(panic_vbox)
+
         config_vbox.addStretch()
         side_panel.addWidget(config_card, stretch=3)
 
@@ -308,6 +352,37 @@ class Dashboard(QMainWindow):
 
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
+    def on_target_changed(self, value):
+        self.execution_manager.TARGET_PROFIT = value / 100.0
+        env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
+        dotenv.set_key(env_file, "TRADE_TARGET_PROFIT", str(round(value / 100.0, 3)))
+        if hasattr(self.execution_manager.logger, 'info'):
+            self.execution_manager.logger.info(f"✅ 환경 설정 갱신: 목표 익절가가 {value}%로 영구 저장되었습니다.")
+
+    def on_trail_changed(self, value):
+        self.execution_manager.TRAILING_STOP_ACTIVATION = value / 100.0
+        env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
+        dotenv.set_key(env_file, "TRAILING_STOP_ACTIVATION", str(round(value / 100.0, 3)))
+        if hasattr(self.execution_manager.logger, 'info'):
+            self.execution_manager.logger.info(f"✅ 환경 설정 갱신: 트레일링 스탑 발동선이 {value}%로 영구 저장되었습니다.")
+
+    def toggle_panic(self):
+        if self.execution_manager.is_risk_halt:
+            # 상태 2 -> 1 (매수 재개)
+            reply = QMessageBox.question(self, '시스템 재가동', '정말로 매수 중단(Lock)을 풀고 정상 사냥 모드로 복귀하시겠습니까?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.execution_manager.is_risk_halt = False
+                self.btn_panic.setText("🚨 긴급 투매 & 매수 중단")
+                self.btn_panic.setStyleSheet("background-color: #D93025; color: white; border-radius: 8px; font-weight: bold; font-size: 13px;")
+                self.execution_manager.slack.send_message("▶️ *[시스템 재가동]* 사용자가 매수 정지 락(Lock)을 해제하여 신규 진입을 재개합니다.")
+        else:
+            # 상태 1 -> 2 (긴급 투매)
+            reply = QMessageBox.question(self, '비상 투매 최종 경고', '보유 중인 모든 종목을 [시장가]로 전량 투척합니까?\n확인 시 신규 매수도 영구 정지됩니다.', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.execution_manager.emergency_liquidate_all(self.pipeline)
+                self.btn_panic.setText("▶️ 시스템 재가동 (매수 재개)")
+                self.btn_panic.setStyleSheet("background-color: #1E8E3E; color: white; border-radius: 8px; font-weight: bold; font-size: 13px;")
+
     def update_dashboard(self):
         # [최적화] 대량 UI 업데이트 시 비동기 렌더링 억제로 스크롤 버벅임 방지
         self.setUpdatesEnabled(False)
@@ -331,6 +406,35 @@ class Dashboard(QMainWindow):
                 self.daily_pnl_label.setStyleSheet(f"font-size: 19px; font-weight: bold; color: {pnl_color}; background: transparent;")
             except:
                 pass
+
+            # [2.5] 미실현 보유 손익(Unrealized PnL) 계산 및 패닉 뷰어 갱신
+            total_unrealized_pnl = 0
+            total_unrealized_cost = 0
+            for code, pos in ex.positions.items():
+                buy_p = pos.get('buy_price', 0)
+                qty = pos.get('qty', 0)
+                if buy_p > 0 and qty > 0:
+                    df_1m, _ = self.pipeline.get_data(code)
+                    if df_1m is not None and not df_1m.empty:
+                        cur_p = df_1m['close'].iloc[-1]
+                    else:
+                        cur_p = buy_p
+                    
+                    # 수수료 차감 후 순 실시간 손익
+                    friction_pct = ex.TRADING_FRICTION * 100.0
+                    net_rate = (((cur_p - buy_p) / buy_p) * 100.0) - friction_pct
+                    
+                    if 'api_profit_rate' in pos and not getattr(self.kiwoom, 'is_mock', False):
+                        net_rate = pos['api_profit_rate']
+                        
+                    unrealized_net_pnl = (buy_p * qty) * (net_rate / 100.0)
+                    total_unrealized_pnl += unrealized_net_pnl
+                    total_unrealized_cost += (buy_p * qty)
+            
+            total_rate = (total_unrealized_pnl / total_unrealized_cost * 100.0) if total_unrealized_cost > 0 else 0.0
+            pnl_color = '#F28B82' if total_unrealized_pnl < 0 else '#8AB4F8' if total_unrealized_pnl > 0 else '#ADB5BD'
+            self.lbl_panic_pnl.setText(f"보유 종목 총 손익: {int(total_unrealized_pnl):+,}원 ({total_rate:+.2f}%)")
+            self.lbl_panic_pnl.setStyleSheet(f"color: {pnl_color}; font-size: 11px; font-weight: bold;")
 
             # [3] 운영 설정 (Config Panel)
             self.lbl_trade_mode.setText(f"💎 매매 모드: {mode_str}")

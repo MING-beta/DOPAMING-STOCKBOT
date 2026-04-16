@@ -9,6 +9,8 @@ import logging
 import time
 import os
 import threading
+import json
+from datetime import datetime
 
 
 class ExecutionManager:
@@ -69,14 +71,56 @@ class ExecutionManager:
         
         # 미체결 주문 추적: { order_no: {code, qty, order_type, sent_at(timestamp)} }
         self.pending_orders = {}
+        self.snapshot_file = os.path.join("data", "dry_run_snapshot.json")
         
         if self.is_dry_run:
-            self.logger.info("🤖 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (로컬 가상 포지션 복원)")
-            self.positions = self.db.load_todays_open_positions()
-            for code, data in self.positions.items():
-                self.logger.info(f"가상 복원 - [{code}] 평단: {data['buy_price']}, 수량: {data['qty']}")
+            self.logger.info("🤖 ** 시뮬레이션(Dry-Run) 모드 작동 중 ** (JSON 스냅샷 복구 진행)")
+            self._load_virtual_snapshot()
         else:
             self.logger.info("🔥 ** 실전 운영(Production) 모드 작동 중 ** (서버 잔고 동기화 대기)")
+
+    def _save_virtual_snapshot(self):
+        """[Dry-Run 전용] 가상 매매 상태를 JSON으로 영구 저장"""
+        if not self.is_dry_run: return
+        os.makedirs(os.path.dirname(self.snapshot_file), exist_ok=True)
+        data = {
+            'date': datetime.now().strftime("%Y-%m-%d"),
+            'positions': getattr(self, 'positions', {}),
+            'daily_pnl': getattr(self, 'daily_pnl', 0),
+            'available_cash': getattr(self.kiwoom, 'available_cash', getattr(self.kiwoom, 'initial_total_assets', 0))
+        }
+        try:
+            with open(self.snapshot_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.logger.error(f"가상 스냅샷 저장 실패: {e}")
+
+    def _load_virtual_snapshot(self):
+        """[Dry-Run 전용] 봇 재구동 시 스냅샷 데이터 복원"""
+        if os.path.exists(self.snapshot_file):
+            try:
+                with open(self.snapshot_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                
+                self.positions = data.get('positions', {})
+                self.kiwoom.available_cash = data.get('available_cash', getattr(self.kiwoom, 'initial_total_assets', 0))
+                
+                if data.get('date') == today_str:
+                    self.daily_pnl = data.get('daily_pnl', 0)
+                    self.logger.info(f"✅ 오늘자 스냅샷 데이터 로드 (당일현황 100% 복구: 실현손익 {self.daily_pnl:,.0f}원)")
+                else:
+                    self.daily_pnl = 0
+                    self.logger.info("✅ 어제자 스냅샷 로드 (어제 살아남은 종목 복원 및 당일 수익금 리셋)")
+                    
+                for code, pos in self.positions.items():
+                    self.logger.info(f"💾 가상 복원완료 - [{code}] 평단: {pos.get('buy_price'):,.0f}, 수량: {pos.get('qty')}주")
+            except Exception as e:
+                self.logger.error(f"❌ 가상 스냅샷 로드 실패: {e}")
+                self.positions = {}
+        else:
+            self.logger.info("ℹ️ 기존 가상 스냅샷이 없어 백지 상태로 시뮬레이션을 시작합니다.")
+            self.positions = {}
 
     def sync_server_positions(self, server_positions):
         """Production 모드 시 서버가 내려준 잔고표로 덮어씌움"""
@@ -435,6 +479,9 @@ class ExecutionManager:
                 self.slack.send_message(exec_msg)
                 
             self.db.insert_execution("EXE_" + str(int(time.time())), code, price, qty, order_type)
+            
+            # [가상 스냅샷 업데이트] 체결이 완료될 때마다 파일에 상태 저장
+            self._save_virtual_snapshot()
 
         except Exception as e:
             self.logger.error(f"❌ record_execution 처리 중 예외 발생: {e}")
@@ -556,4 +603,19 @@ class ExecutionManager:
                 
         # 리포팅
         msg = f"🚨 *[15:19 오버나잇 3단계 검문 결과]*\n- 💣 위험군 도태 (시장가 컷): {liquidated_count}개 종목\n- 💎/💤 생존 승인 (오버나잇): {held_count}개 종목"
+        self.slack.send_message(msg)
+
+    def emergency_liquidate_all(self, pipeline):
+        """[패닉 버튼 전용] 모든 종목을 즉시 시장가 투매하고, 신규 매수를 영구 차단합니다."""
+        liquidated_count = 0
+        with self.lock:
+            codes_to_sell = list(self.positions.keys())
+            
+        for code in codes_to_sell:
+            self.logger.critical(f"🚨 [긴급 강제 투매] {code} - 사용자의 비상 버튼 개입으로 즉시 시장가 투척!")
+            self.execute_sell(code, pipeline, sell_type="패닉투매")
+            liquidated_count += 1
+            
+        self.is_risk_halt = True
+        msg = f"🚨 *[긴급 시스템 정지 & 투매 발동]*\n- 💣 완전히 모든 주식을 시장가로 내던졌습니다 ({liquidated_count}종목).\n- 신규 매수 시스템이 정지(Lock)되었습니다."
         self.slack.send_message(msg)

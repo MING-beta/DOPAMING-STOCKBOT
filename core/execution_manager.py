@@ -237,8 +237,10 @@ class ExecutionManager:
         
         if self.is_dry_run:
             df_1m, _ = pipeline.get_data(code)
-            if df_1m.empty: return
-            current_price = df_1m['close'].iloc[-1]
+            if df_1m is not None and not df_1m.empty:
+                current_price = df_1m['close'].iloc[-1]
+            else:
+                current_price = self.positions[code].get('current_price', self.positions[code]['buy_price'])
             
             self.logger.warning(f"🤖 [DRY-RUN 가상 {sell_type}] {code} - 가격: {current_price}, 수량: {qty}")
             self.record_execution("VIRTUAL_S", code, current_price, qty, "체결완료", "-매도")

@@ -94,7 +94,7 @@ class HistoricalDataFetcher:
             
             # 중간 저장 (Autosave): 데이터가 있을 경우 무조건 파일로 덤프하여 유실 방지
             if not df.empty:
-                df.to_csv(csv_path)
+                df.to_csv(csv_path) 
             
             if next_state == "2" and current_len < self.target_count:
                 # 다음 차례 요청 (중복 요청 방지를 위해 상태 초기화)

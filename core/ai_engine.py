@@ -42,6 +42,33 @@ AI_THRESHOLD = float(os.getenv("AI_THRESHOLD", "0.72"))
 # Shadow Mode: True이면 AI가 로그만 남기고 매수 결정에 간섭하지 않음
 SHADOW_MODE = os.getenv("AI_SHADOW_MODE", "True").lower() == "true"
 
+class NumpyLogisticRegression:
+    def __init__(self, lr=0.01, iters=1000):
+        self.lr = lr
+        self.iters = iters
+    def fit(self, X, y):
+        self.mean = np.mean(X, axis=0)
+        self.std = np.std(X, axis=0) + 1e-8
+        X_norm = (X - self.mean) / self.std
+        n_samples, n_features = X_norm.shape
+        self.weights = np.zeros(n_features)
+        self.bias = 0
+        for _ in range(self.iters):
+            linear_model = np.dot(X_norm, self.weights) + self.bias
+            y_pred = 1 / (1 + np.exp(-np.clip(linear_model, -250, 250)))
+            dw = (1 / n_samples) * np.dot(X_norm.T, (y_pred - y))
+            db = (1 / n_samples) * np.sum(y_pred - y)
+            self.weights -= self.lr * dw
+            self.bias -= self.lr * db
+    def predict_proba(self, X):
+        X_norm = (X - self.mean) / self.std
+        linear_model = np.dot(X_norm, self.weights) + self.bias
+        y_pred = 1 / (1 + np.exp(-np.clip(linear_model, -250, 250)))
+        return np.column_stack((1 - y_pred, y_pred))
+    def predict(self, X):
+        probs = self.predict_proba(X)
+        return (probs[:, 1] >= 0.5).astype(int)
+
 
 class AIEngine:
     """
@@ -210,34 +237,11 @@ class AIEngine:
         return X, y
 
     def _train_worker(self, force: bool):
-        """백그라운드 학습 워커"""
-        self.logger.info("📚 AI 모델 재학습 시작...")
+        """백그라운드 학습 워커 (순수 Numpy 기반 Logistic Regression)"""
+        self.logger.info("📚 AI 모델 재학습 시작... (Numpy LogReg)")
         try:
-            # LightGBM 임포트 (선택적 의존성)
-            try:
-                import lightgbm as lgb
-                from sklearn.model_selection import train_test_split
-                Classifier = lgb.LGBMClassifier
-                clf_kwargs = {
-                    "n_estimators": 300,
-                    "max_depth":    6,
-                    "learning_rate": 0.05,
-                    "num_leaves":   31,
-                    "verbose":      -1,
-                    "random_state": 42,
-                }
-            except ImportError:
-                # LightGBM 없으면 scikit-learn 의 GradientBoosting 으로 폴백
-                self.logger.warning("LightGBM 없음 → GradientBoostingClassifier 폴백")
-                from sklearn.ensemble import GradientBoostingClassifier
-                from sklearn.model_selection import train_test_split
-                Classifier = GradientBoostingClassifier
-                clf_kwargs = {
-                    "n_estimators": 200,
-                    "max_depth":    5,
-                    "learning_rate": 0.05,
-                    "random_state": 42,
-                }
+            Classifier = NumpyLogisticRegression
+            clf_kwargs = {"lr": 0.05, "iters": 2000}
 
             X, y = self._fetch_train_data()
             if X is None:
@@ -253,17 +257,16 @@ class AIEngine:
                 )
                 return
 
-            # 클래스 불균형 처리를 위한 가중치 계산
+            # 클래스 불균형 처리를 위한 가중치 계산 (Numpy LogReg에는 미적용)
             win_ratio  = float(np.mean(y))
-            scale_pos  = (1 - win_ratio) / max(win_ratio, 1e-6)
-            if "scale_pos_weight" in Classifier().get_params():
-                clf_kwargs["scale_pos_weight"] = scale_pos
-
-            # 학습 / 검증 분리
+            
+            # 학습 / 검증 분리 (간이 Numpy 구현)
             if n_samples >= 50:
-                X_tr, X_val, y_tr, y_val = train_test_split(
-                    X, y, test_size=0.2, random_state=42, stratify=y
-                )
+                indices = np.random.permutation(n_samples)
+                split_idx = int(n_samples * 0.8)
+                train_idx, val_idx = indices[:split_idx], indices[split_idx:]
+                X_tr, X_val = X[train_idx], X[val_idx]
+                y_tr, y_val = y[train_idx], y[val_idx]
             else:
                 X_tr, X_val, y_tr, y_val = X, X, y, y
 

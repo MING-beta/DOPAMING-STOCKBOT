@@ -67,8 +67,12 @@ class BacktestEngine:
             if code in self.broker.positions:
                 pos = self.broker.positions[code]
                 buy_price = pos['buy_price']
-                # [Net ROI 로직 적용] 실거래와 동일하게 비용(Friction) 차감
-                profit_rate = ((current_price - buy_price) / buy_price) - self.trading_friction
+                # [v6.0] 보유 시간 계산을 상단으로 이동하여 모든 청산 로직에서 사용 가능하게 함
+                hold_duration = (current_time - pos['buy_time']).total_seconds() / 60
+                
+                # [v5.7 수정보강] 수수료 중복 차감 방지를 위해 순수 가격 변동률(Gross)로 판정 로직 일원화
+                # 가상 브로커가 실제 자산 차감을 담당하므로 지표는 가격 기반으로 측정합니다.
+                profit_rate = (current_price - buy_price) / buy_price
                 
                 # [로깅 최적화] 보유 시 실시간 수익률 기록 생략
                 # self.logger.debug(f"   >> ROI:{profit_rate*100:.2f}% | High:{high_price:,.0f} | BreakEven:{reached_breakeven}")
@@ -86,9 +90,9 @@ class BacktestEngine:
                     trailing_activated = False
                     continue
                 
-                # [v5.4] A-2. 스마트 익절 (BB 상단 터치 & 순익권)
+                # [v6.2 Friction Conqueror] 스마트 익절: 수수료(0.9%)를 감안하여 최소 1.2% 이상 시에만 허용
                 bb_upper = df_1m['BB_Upper'].iloc[i]
-                if current_price >= bb_upper and profit_rate > 0.003: # 최소 0.3% 순익 보장 시
+                if current_price >= bb_upper and profit_rate > 0.012: # 수수료 0.9% + 순익 0.3% 보장 시
                     next_open = df_1m['open'].iloc[i+1]
                     self.logger.info(f"[{code}] [SELL] [SMART] BB 상단 터치 익절: {profit_rate*100:.2f}%")
                     self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
@@ -106,10 +110,10 @@ class BacktestEngine:
                     continue
 
                 # C. 본절 보호 및 트레일링 활성화 판별
-                # [v5.4] 쉴드 강화: ROI +1.5% 도달 시 확실한 본절(+0.1% 이상) 확보
+                # [v6.0 AI-Sniper] 강화된 본절 보호: 1.5% 도달 시 확실한 순익(+0.1% Net) 확보 구역 진입
                 if not reached_breakeven and profit_rate >= 0.015: 
                     reached_breakeven = True
-                    self.logger.info(f"[{code}] [SHIELD] 강력한 수익 확보(+1.5%), 본절 보호 상향")
+                    self.logger.info(f"[{code}] [SHIELD] 수수료 극복 구간 진입(+1.5%), 실질 본절 매도 상향")
 
                 if not reached_breakeven and profit_rate >= self.breakeven_trigger:
                     reached_breakeven = True
@@ -124,8 +128,19 @@ class BacktestEngine:
                     trailing_stop_price = high_price * (1.0 - trailing_callback)
                     if current_price <= trailing_stop_price:
                         next_open = df_1m['open'].iloc[i+1]
-                        real_profit = ((next_open - buy_price) / buy_price) - self.trading_friction
-                        self.logger.info(f"[{code}] [SELL] [TRAILING] 고점({high_price:,.0f}) 대비 하락 청산 (수익률: {real_profit*100:.2f}%)")
+                        real_price_profit = (next_open - buy_price) / buy_price
+                        self.logger.info(f"[{code}] [SELL] [TRAILING] 고점({high_price:,.0f}) 대비 하락 청산 (변동률: {real_price_profit*100:.2f}%)")
+                        self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
+                        reached_breakeven = False
+                        trailing_activated = False
+                        continue
+
+                # [v9.3 Patience] 데드존(Deadzone) 유연화
+                # 진입 후 5분이 지났는데도 수익권(+1.0% 이상)에 진입하지 못할 때만 퇴출
+                if 5 <= hold_duration < self.exit_minutes:
+                    if profit_rate < 0.010: 
+                        next_open = df_1m['open'].iloc[i+1]
+                        self.logger.info(f"[{code}] [SELL] [DEADZONE] 5분 내 수익권 미진출로 탈출 (수익률: {profit_rate*100:.2f}%)")
                         self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
                         reached_breakeven = False
                         trailing_activated = False
@@ -133,7 +148,6 @@ class BacktestEngine:
 
                 # [v4.7] E. 타임컷(Time-Cut) 청산 판별
                 # 진입 시점(buy_time)으로부터 설정한 시간이 지났는지 체크
-                hold_duration = (current_time - pos['buy_time']).total_seconds() / 60
                 if hold_duration >= self.exit_minutes:
                     next_open = df_1m['open'].iloc[i+1]
                     self.logger.info(f"[{code}] [SELL] [TIME-CUT] 보유 시간 초과 ({int(hold_duration)}분) 강제 청산 (수익률: {profit_rate*100:.2f}%)")
@@ -142,8 +156,8 @@ class BacktestEngine:
                     trailing_activated = False
                     continue
 
-                # F. 손절/본절가 청산 판별 (타임컷 이후로 순서 변경하여 우선순위 조정)
-                current_stop_limit = self.breakeven_stop if reached_breakeven else self.stop_loss
+                # G. 손절/본절가 청산 판별 (v6.0: 본절 시 수수료 포함 +0.1% Net 수익 구간 보호)
+                current_stop_limit = 0.010 if reached_breakeven else self.stop_loss
                 if profit_rate <= current_stop_limit:
                     next_open = df_1m['open'].iloc[i+1]
                     self.logger.info(f"[{code}] [SELL] 손절/본절가 도달: {profit_rate*100:.2f}% (Limit: {current_stop_limit*100:.2f}%)")

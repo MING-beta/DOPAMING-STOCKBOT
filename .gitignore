@@ -18,3 +18,9 @@ stderr.log
 .idea/
 scratch/
 =
+
+# Backtest Logs & Models
+backtest_*.txt
+*.csv
+*.db
+*.pkl

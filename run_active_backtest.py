@@ -12,6 +12,8 @@ from backtest.historical_data_manager import HistoricalDataManager
 from backtest.virtual_broker import VirtualBroker
 from backtest.engine import BacktestEngine, calculate_total_profit
 from strategy.stefano_strategy import StefanoStrategy
+from core.ai_engine import AIEngine
+from core.data_collector import DataCollector
 from dotenv import load_dotenv
 
 def run_single_backtest(code, init_balance, friction):
@@ -19,6 +21,10 @@ def run_single_backtest(code, init_balance, friction):
     # 워커 내에서는 로깅을 콘솔에 찍지 않음 (로그 꼬임 방지)
     logger = logging.getLogger("DopamingBot")
     logger.setLevel(logging.ERROR) 
+    
+    # [BUG FIX] Windows 다중 프로세스 환경에서는 워커별로 환경변수를 다시 로드해야 함
+    from dotenv import load_dotenv
+    load_dotenv()
 
     try:
         tax_rate = 0.002 
@@ -34,6 +40,12 @@ def run_single_backtest(code, init_balance, friction):
             slippage=slippage
         )
         strategy = StefanoStrategy()
+        
+        # [v10.0 AI Resurrection] AI 판독기(AIEngine) 및 데이터 수집기(DataCollector) 활성화
+        ai_engine = AIEngine()
+        data_collector = DataCollector()
+        strategy.set_ai_modules(ai_engine, data_collector)
+        
         engine = BacktestEngine(broker, strategy)
         
         df = manager.load_code_data(code)
@@ -51,10 +63,19 @@ def run_single_backtest(code, init_balance, friction):
 def main():
     load_dotenv()
     
-    TARGET_CODES = [
-        "000250", "005930", "000660", "247540", "298380",
-        "010130", "005490", "042660", "035420", "000150"
-    ]
+    data_dir = os.path.join(base_dir, "data", "historical")
+    TARGET_CODES = []
+    if os.path.exists(data_dir):
+        for fname in os.listdir(data_dir):
+            if fname.endswith("_1m.csv"):
+                code = fname.replace("_1m.csv", "")
+                TARGET_CODES.append(code)
+                
+    TARGET_CODES = sorted(list(set(TARGET_CODES)))
+    
+    if not TARGET_CODES:
+        print("에러: data/historical 폴더에 _1m.csv 데이터 파일이 없습니다!")
+        return
     
     # 각 종목당 할당 자산 (포트폴리오 개념)
     PER_STOCK_BALANCE = 10000000 
@@ -62,7 +83,7 @@ def main():
     friction = float(os.getenv("TRADING_FRICTION", "0.009"))
     
     print("\n" + "=" * 50)
-    print(f" [병렬 처리] 핵심 10종목 고속 백테스트 시작")
+    print(f" [병렬 처리] 대규모 {len(TARGET_CODES)}종목 고속 백테스트 시작")
     print(f"대상: {', '.join(TARGET_CODES)}")
     print(f"CPU 코어 활용 병렬 실행 중...")
     print("=" * 50)
@@ -107,7 +128,7 @@ def main():
     pf = total_win / total_loss if total_loss > 0 else 999.0
 
     print("\n" + "REPORT " + "=" * 43)
-    print(f"[백테스트 결과 리포트: 핵심 10종목 (초고속)]")
+    print(f"[백테스트 결과 리포트: 유니버스 {len(TARGET_CODES)}종목 (Total Victory)]")
     print(f"총 실행 시간: {duration:.2f}초")
     print(f"전체 수익률: {total_profit_rate:+.2f}%")
     print(f"최종 합산 자산: {total_final_value:,.0f} 원")

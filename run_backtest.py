@@ -66,17 +66,11 @@ def main():
     historical_files = [f for f in os.listdir(data_path) if f.endswith("_1m.csv")]
     available_codes = [f.split('_')[0] for f in historical_files]
     
-    # [v5.1] .env에 설정된 특정 종목이 있으면 해당 종목들만 우선 테스트
-    env_codes = os.getenv("BACKTEST_TARGET_CODES", "").strip()
-    if env_codes:
-        target_list = [c.strip() for c in env_codes.split(',') if c.strip()]
-        codes = [c for c in target_list if c in available_codes]
-        if not codes:
-            print(f"⚠️ [주의] BACKTEST_TARGET_CODES에 설정된 종목 중 유효한 데이터가 없습니다. 상위 10개로 진행합니다.")
-            codes = sorted(available_codes)[:10]
-    else:
-        # 설정이 없으면 상위 10개 종목으로 기본 제한 (빠른 검증용)
-        codes = sorted(available_codes)[:10]
+    # [v5.6] 테스트 결과 일치화를 위해 병렬 엔진과 동일한 10개 핵심 종목으로 고정
+    codes = [
+        "000250", "005930", "000660", "247540", "298380",
+        "010130", "005490", "042660", "035420", "000150"
+    ]
     
     if not codes:
         print(f"[오류] {data_path} 디렉토리에 분석할 CSV 파일이 없습니다.")

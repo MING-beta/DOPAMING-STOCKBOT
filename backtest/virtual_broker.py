@@ -35,7 +35,7 @@ class VirtualBroker:
         self.peak_balance = initial_balance # MDD 계산용 고점
         self.max_drawdown = 0
 
-    def buy(self, code, price, qty, dt):
+    def buy(self, code, price, qty, dt, signal_type="상향돌파"):
         """매수 실행 (슬리피지 가산)"""
         # 슬리피지 반영 (매수는 좀 더 비싸게 산다고 가정)
         execution_price = price * (1.0 + self.slippage)
@@ -60,7 +60,7 @@ class VirtualBroker:
             self.positions[code]['qty'] = new_qty
             # 추가 매수 시에도 최초 진입 시간을 기준으로 타임컷을 계산하기 위해 buy_time은 업데이트하지 않음
         else:
-            self.positions[code] = {'buy_price': execution_price, 'qty': qty, 'buy_time': dt}
+            self.positions[code] = {'buy_price': execution_price, 'qty': qty, 'buy_time': dt, 'signal_type': signal_type}
             
         self.order_history.append({
             'time': dt, 'code': code, 'type': 'BUY', 

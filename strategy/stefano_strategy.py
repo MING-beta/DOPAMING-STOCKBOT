@@ -120,7 +120,7 @@ class StefanoStrategy:
             return {col: 0.0 for col in ["rsi_1m","rsi_5m","bb_pct_1m","bb_pct_5m","vol_ratio","price_chg_5","price_chg_20","macro_div","micro_div","is_aggressive"]}
 
     def analyze(self, code, df_1m: pd.DataFrame, df_5m: pd.DataFrame):
-        if df_1m.empty or df_5m.empty: return False
+        if df_1m.empty or df_5m.empty: return False, ""
         vol_mean = df_1m['volume'].iloc[-20:-1].mean()
         vol_ratio_scanner = df_1m['volume'].iloc[-1] / vol_mean if vol_mean > 0 else 1.0
         day_high, day_low = df_1m['high'].max(), df_1m['low'].min()
@@ -134,14 +134,14 @@ class StefanoStrategy:
         current_time_str = now_dt.strftime("%H:%M")
         if not (self.buy_start_time <= current_time_str <= self.buy_end_time):
             self.logger.debug(f"[{code}] [PASS] 매매 가능 시간 아님 ({current_time_str})")
-            return False
+            return False, ""
             
         seconds_passed = now_dt.second if hasattr(now_dt, 'second') else 30
         time_weight = max(seconds_passed, 5) / 60.0
         dynamic_vol_threshold = vol_threshold * time_weight
-        if vol_ratio_scanner < dynamic_vol_threshold or day_range_pct < range_threshold: return False
+        if vol_ratio_scanner < dynamic_vol_threshold or day_range_pct < range_threshold: return False, ""
         min_5m_len = 5 if self.bypass_macro else 20
-        if len(df_1m) < 20 or len(df_5m) < min_5m_len: return False
+        if len(df_1m) < 20 or len(df_5m) < min_5m_len: return False, ""
         df_1m = self._get_cached_indicators(code, "1m", df_1m)
         df_5m = self._get_cached_indicators(code, "5m", df_5m)
         macro_div = self._check_bullish_divergence(df_5m, window=self.check_window, distance=2)
@@ -175,10 +175,10 @@ class StefanoStrategy:
             is_vol_spike = vol_ratio >= self.vol_spike_threshold if self.require_vol_spike else True
             is_rsi_hook = rsi_1m >= df_1m['RSI'].iloc[-2] if len(df_1m) >= 2 else True
             now_ts = df_1m.index[-1].timestamp()
-            if now_ts - self.signal_cooldowns.get(code, 0) < self.signal_cooldown_limit: return False
+            if now_ts - self.signal_cooldowns.get(code, 0) < self.signal_cooldown_limit: return False, ""
             bb_upper = df_1m['BB_Upper'].iloc[-1]
             bb_width = (bb_upper - bb_lower) / ((bb_upper + bb_lower) / 2) if (bb_upper + bb_lower) > 0 else 0
-            if bb_width > self.bb_width_limit: return False
+            if bb_width > self.bb_width_limit: return False, ""
             min_price_10m = df_1m['low'].iloc[-10:].min()
             actual_recovery = (last_price / min_price_10m) - 1
             rsi_5m = df_5m['RSI'].iloc[-1]
@@ -197,28 +197,28 @@ class StefanoStrategy:
                 # [v8.1] 눌림목 추가 타점 확보
                 is_pullback = self._check_pullback_entry(df_1m)
                 
-                if not (is_breakout or is_pullback): return False
+                if not (is_breakout or is_pullback): return False, ""
                 
                 if is_breakout:
                     # 돌파 매매는 강력한 거시 정배열이 필수
-                    if not (is_macro_up and is_macro_aligned): return False
-                    signal_type = "상항돌파"
+                    if not (is_macro_up and is_macro_aligned): return False, ""
+                    signal_type = "상향돌파"
                 else:
                     signal_type = "눌림목반등"
-                    if not is_macro_up: return False 
+                    if not is_macro_up: return False, ""
             else:
-                if not is_entry_signal: return False
+                if not is_entry_signal: return False, ""
                 signal_type = "다이버전스" if micro_div else "V자반등"
 
             is_macro_confirmed = self.macro_states.get(code, False)
             features = self._extract_ai_features(code, df_1m, df_5m, is_macro_confirmed, micro_div)
             if self.ai_engine:
                 approved, prob = self.ai_engine.approve(features)
-                if not approved: return False
+                if not approved: return False, ""
                 suffix = " + 추세 탑승" if self.strategy_mode == "BREAKOUT" else (" + 거시 우회" if not is_macro_confirmed else " + 5분봉 컨펌")
                 self.logger.warning(f"[{code}] [SIGNAL] 1분봉 {signal_type}{suffix}! AI 승인({prob*100:.1f}%) -> 매수!")
             else:
-                if self.strategy_mode != "BREAKOUT" and not is_macro_confirmed and not self.bypass_macro: return False
+                if self.strategy_mode != "BREAKOUT" and not is_macro_confirmed and not self.bypass_macro: return False, ""
                 suffix = " + 추세 탑승" if self.strategy_mode == "BREAKOUT" else (" + 거시 우회" if not is_macro_confirmed else " + 5분봉 컨펌")
                 self.logger.warning(f"[{code}] [SIGNAL] 1분봉 {signal_type}{suffix}! 매수 실행!")
             
@@ -228,8 +228,8 @@ class StefanoStrategy:
 
             self.macro_states[code] = False
             self.signal_cooldowns[code] = now_ts
-            return True
-        return False
+            return True, signal_type
+        return False, ""
 
     def _get_cached_indicators(self, code, timeframe, df):
         if 'RSI' in df.columns and 'BB_Lower' in df.columns: return df

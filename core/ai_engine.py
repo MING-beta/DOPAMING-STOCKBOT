@@ -42,29 +42,75 @@ AI_THRESHOLD = float(os.getenv("AI_THRESHOLD", "0.72"))
 # Shadow Mode: True이면 AI가 로그만 남기고 매수 결정에 간섭하지 않음
 SHADOW_MODE = os.getenv("AI_SHADOW_MODE", "True").lower() == "true"
 
-class NumpyLogisticRegression:
-    def __init__(self, lr=0.01, iters=1000):
+class NumpyMLP:
+    """
+    비선형 패턴 학습용 2층 딥러닝 신경망 (순수 Numpy 구현, 외부 C컴파일 의존성 완벽 제거)
+    - Hidden Layer: 16 뉴런, ReLU 활성화 함수
+    - Output Layer: 1 뉴런, Sigmoid 활성화 함수
+    XGBoost 설치 실패(32bit 환경 제약)를 우회하여 비선형 분류 스펙 극대화
+    """
+    def __init__(self, hidden_size=16, lr=0.1, iters=2000):
+        self.hidden_size = hidden_size
         self.lr = lr
         self.iters = iters
+
+    def _relu(self, Z):
+        return np.maximum(0, Z)
+
+    def _relu_deriv(self, Z):
+        return (Z > 0).astype(float)
+
+    def _sigmoid(self, Z):
+        return 1 / (1 + np.exp(-np.clip(Z, -250, 250)))
+
     def fit(self, X, y):
         self.mean = np.mean(X, axis=0)
         self.std = np.std(X, axis=0) + 1e-8
         X_norm = (X - self.mean) / self.std
+        
         n_samples, n_features = X_norm.shape
-        self.weights = np.zeros(n_features)
-        self.bias = 0
-        for _ in range(self.iters):
-            linear_model = np.dot(X_norm, self.weights) + self.bias
-            y_pred = 1 / (1 + np.exp(-np.clip(linear_model, -250, 250)))
-            dw = (1 / n_samples) * np.dot(X_norm.T, (y_pred - y))
-            db = (1 / n_samples) * np.sum(y_pred - y)
-            self.weights -= self.lr * dw
-            self.bias -= self.lr * db
+        
+        # 가중치 초기화 (He initialization 적용)
+        np.random.seed(42)
+        self.W1 = np.random.randn(n_features, self.hidden_size) * np.sqrt(2. / n_features)
+        self.b1 = np.zeros((1, self.hidden_size))
+        self.W2 = np.random.randn(self.hidden_size, 1) * np.sqrt(1. / self.hidden_size)
+        self.b2 = np.zeros((1, 1))
+
+        y = y.reshape(-1, 1)
+
+        for i in range(self.iters):
+            # 순전파 (Forward)
+            Z1 = np.dot(X_norm, self.W1) + self.b1
+            A1 = self._relu(Z1)
+            Z2 = np.dot(A1, self.W2) + self.b2
+            A2 = self._sigmoid(Z2)
+
+            # 역전파 (Backward)
+            dZ2 = A2 - y
+            dW2 = (1 / n_samples) * np.dot(A1.T, dZ2)
+            db2 = (1 / n_samples) * np.sum(dZ2, axis=0, keepdims=True)
+
+            dA1 = np.dot(dZ2, self.W2.T)
+            dZ1 = dA1 * self._relu_deriv(Z1)
+            dW1 = (1 / n_samples) * np.dot(X_norm.T, dZ1)
+            db1 = (1 / n_samples) * np.sum(dZ1, axis=0, keepdims=True)
+
+            # 가중치 갱신 (Gradient Descent Update)
+            self.W1 -= self.lr * dW1
+            self.b1 -= self.lr * db1
+            self.W2 -= self.lr * dW2
+            self.b2 -= self.lr * db2
+
     def predict_proba(self, X):
         X_norm = (X - self.mean) / self.std
-        linear_model = np.dot(X_norm, self.weights) + self.bias
-        y_pred = 1 / (1 + np.exp(-np.clip(linear_model, -250, 250)))
-        return np.column_stack((1 - y_pred, y_pred))
+        Z1 = np.dot(X_norm, self.W1) + self.b1
+        A1 = self._relu(Z1)
+        Z2 = np.dot(A1, self.W2) + self.b2
+        A2 = self._sigmoid(Z2)
+        # Scikit-learn 호환성을 위해 2D 배열 리턴: [prob(0), prob(1)]
+        return np.column_stack((1 - A2, A2))
+        
     def predict(self, X):
         probs = self.predict_proba(X)
         return (probs[:, 1] >= 0.5).astype(int)
@@ -237,11 +283,11 @@ class AIEngine:
         return X, y
 
     def _train_worker(self, force: bool):
-        """백그라운드 학습 워커 (순수 Numpy 기반 Logistic Regression)"""
-        self.logger.info("📚 AI 모델 재학습 시작... (Numpy LogReg)")
+        """백그라운드 학습 워커 (순수 Numpy 기반 MLP 딥러닝)"""
+        self.logger.info("📚 비선형 AI 모델(Numpy MLP Layers) 재학습 시작...")
         try:
-            Classifier = NumpyLogisticRegression
-            clf_kwargs = {"lr": 0.05, "iters": 2000}
+            Classifier = NumpyMLP
+            clf_kwargs = {"hidden_size": 16, "lr": 0.1, "iters": 3000}
 
             X, y = self._fetch_train_data()
             if X is None:

@@ -83,11 +83,11 @@ class Dashboard(QMainWindow):
         pos_title.setFont(QFont("Apple SD Gothic Neo", 14, QFont.Bold))
         pos_vbox.addWidget(pos_title)
 
-        self.pos_table = QTableWidget(0, 9)
-        self.pos_table.setColumnCount(9)
+        self.pos_table = QTableWidget(0, 10)
+        self.pos_table.setColumnCount(10)
         self.pos_table.setHorizontalHeaderLabels([
             "종목명", "매입가", "수익률", "평가손익", "매입금액", 
-            "현재가", "보유수량", "등락률", "보유비중"
+            "현재가", "보유수량", "등락률", "보유비중", "진입 전략"
         ])
         self.pos_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.pos_table.setColumnWidth(0, 180) # 종목명 컬럼 너비 확장
@@ -342,13 +342,17 @@ class Dashboard(QMainWindow):
             self.lbl_indicators.setText(f"📊 보조지표 설정: RSI({rsi_p}) | 볼린저밴드(20, 2.0)")
 
             # [4] 감시 종목 테이블 업데이트 (Batch 모드 활용)
+            def get_sort_key(c):
+                if c in self.execution_manager.positions:
+                    return 0 # 1순위: 보유중
+                elif self.strategy.macro_states.get(c, False):
+                    return 1 # 2순위: 진입대기(매크로 통과)
+                else:
+                    return 2 # 3순위: 스캔중(바이패스 관망)
+
             monitored_codes = sorted(
                 list(self.kiwoom.monitored_codes.keys()),
-                key=lambda c: (
-                    0 if self.strategy.macro_states.get(c, False) else 1,
-                    -self.kiwoom.monitored_codes.get(c, 0),
-                    c
-                )
+                key=lambda c: (get_sort_key(c), c)
             )
             
             # 일괄 데이터 획득으로 Lock 경합 최소화
@@ -532,7 +536,18 @@ class Dashboard(QMainWindow):
                 
                 # 잔고 비중
                 pos_weight = (valuation_amt / total_account_value * 100) if total_account_value > 0 else 0
-
+                update_pos_cell(row, 8, f"{pos_weight:.1f}%")
+                
+                # 진입 전략명 UI 표출
+                s_type = data.get('signal_type', '기본(스캘핑)')
+                if s_type == 'breakout': s_type_str = "🚀 돌파"
+                elif s_type == 'pullback': s_type_str = "🌊 눌림목"
+                elif s_type == 'ai_sniper': s_type_str = "🤖 AI저격"
+                elif s_type == 'patience': s_type_str = "💤 인내결실"
+                elif s_type == 'macro': s_type_str = "🌍 거시추세"
+                else: s_type_str = f"⚡ {s_type}"
+                
+                update_pos_cell(row, 9, s_type_str, "#FADB14", QFont("Apple SD Gothic Neo", 10, QFont.Bold))
         except Exception as e:
             # UI 스레드 예외를 로거에 기록하여 추적 가능하게 함
             import logging

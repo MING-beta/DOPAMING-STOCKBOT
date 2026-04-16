@@ -82,7 +82,9 @@ class ExecutionManager:
         for code, data in self.positions.items():
             self.logger.info(f"실계좌 잔고 - [{code}] 평단: {data['buy_price']}, 수량: {data['qty']}")
 
-    def execute_buy(self, code, pipeline):
+    def execute_buy(self, code, pipeline, signal_type="상향돌파"):
+        """새로운 종목을 매수합니다.
+        가용 현금과 비중(INVEST_RATE_PER_STOCK)을 체크하여 주문합니다."""
         # [리스크 가드] 신규 매수 전 당일 실현 손실 한도 상시 체크
         if not self.is_risk_halt and self.FIXED_LOSS_LIMIT > 0:
             if self.daily_pnl <= -self.FIXED_LOSS_LIMIT:
@@ -116,7 +118,6 @@ class ExecutionManager:
 
         # 2. 목표 투자금액 산출 (환경변수 비중 적용)
         invest_rate = self.INVEST_RATE_PER_STOCK
-        # [수정] 총 자산 인식이 엇갈릴 경우를 대비해 현금과 총 자산 중 큰 값을 기준 자산으로 삼음
         base_assets = max(self.kiwoom.initial_total_assets, self.kiwoom.available_cash)
         
         target_budget = base_assets * invest_rate
@@ -141,14 +142,12 @@ class ExecutionManager:
                 self.logger.warning(f"⚠️ [가용 현금 제한] 잔액에 맞춰 {qty}주로 수량을 조정합니다. (가용:{effective_cash:,}원)")
 
             if self.is_dry_run:
-                self.logger.warning(f"🤖 [DRY-RUN 가상 매수] {code} - 가격: {current_price}, 수량: {qty}")
-                # [v5.1] 슬랙 알림 시 0주로 표기되는 현상을 막기 위해 qty를 total_order_qty로 전달
+                self.logger.warning(f"🤖 [DRY-RUN 가상 매수] {code}({signal_type}) - 가격: {current_price}, 수량: {qty}")
                 self.record_execution("VIRTUAL_B", code, current_price, qty, "체결완료", "+매수", cumulative_qty=qty, total_order_qty=qty)
+                # 가상 체결 직후 포지션에 시그널 타입 심기
+                if code in self.positions: self.positions[code]['signal_type'] = signal_type
                 return
                 
-            # Kiwoom 코어에 주문 위임
-            self.logger.warning(f"🚀 [{code}] 진입 매수 주문 발송 (가격: {current_price:,}원, 수량: {qty}주)")
-            
             # Kiwoom 코어에 주문 위임
             self.logger.warning(f"🚀 [{code}] 진입 매수 주문 발송 (가격: {current_price:,}원, 수량: {qty}주)")
             
@@ -159,10 +158,11 @@ class ExecutionManager:
             pending_key = f"BUY_{code}"
             self.pending_orders[pending_key] = {
                 'code': code, 'qty': qty, 'order_type': '매수',
-                'sent_at': time.time(), 'screen_no': '1001'
+                'sent_at': time.time(), 'screen_no': '1001',
+                'signal_type': signal_type
             }
-        # msg = f"[매수 주문 접수] {code}, 수량: {qty} (약 {qty*current_price:,}원)"
-        # self.slack.send_message(msg)
+        msg = f"🚀 [매수 주문 접수] {code}, 수량: {qty}주 (약 {qty*current_price:,}원)"
+        self.slack.send_message(msg)
 
     def execute_sell(self, code, pipeline, sell_type="익절"):
         """보유 종목 시장가 전량 청산 (sell_type: '익절' 또는 '손절')"""
@@ -197,8 +197,8 @@ class ExecutionManager:
             'code': code, 'qty': qty, 'order_type': f'매도({sell_type})',
             'sent_at': time.time(), 'screen_no': '1002'
         }
-        # msg = f"[{sell_type} 주문 접수] 종목코드: {code}, 수량: {qty} (미체결 감시 시작)"
-        # self.slack.send_message(msg)
+        msg = f"💥 [{sell_type} 매도 접수] 종목: {code}, 수량: {qty}주"
+        self.slack.send_message(msg)
 
     def monitor_positions(self, pipeline):
         """
@@ -220,12 +220,14 @@ class ExecutionManager:
             current_price = df_1m['close'].iloc[-1]
             buy_price = pos_data['buy_price']
             
-            # [Net ROI 공식 통합] 키움 서버가 계산한 수익률(세금/수수료 포함)이 있다면 최우선 사용
-            if 'api_profit_rate' in pos_data:
+            is_mock = getattr(self.kiwoom, 'is_mock', False)
+            
+            # [Net ROI 공식 통합] 실전거래일 때만 서버 수익률을 우선 사용하고, 모의투자일 땐 가짜 수수료(0.9%) 기반 데이터를 무시
+            if 'api_profit_rate' in pos_data and not is_mock:
                 profit_rate = pos_data['api_profit_rate']
                 is_official = True
             else:
-                # API 데이터가 아직 동기화 전일 경우만 자체 계산 (단, 환경변수의 제비용 선행 감안)
+                # API 데이터가 아직 동기화 전이거나 모의투자 환경일 때 자체 계산 (실제 0.25% 공제)
                 # (Formula: (current - buy) / buy * 100 - (FRICTION * 100))
                 profit_rate = (((current_price - buy_price) / buy_price) * 100.0) - (self.TRADING_FRICTION * 100.0)
                 is_official = False
@@ -268,8 +270,22 @@ class ExecutionManager:
                 self.slack.send_message(f"🛡️ *[SHIELD]* {code} 수익률 {profit_rate:.2f}% 도달! 본전 보호 라인을 +{self.BREAKEVEN_PROTECT*100:.1f}%로 설정합니다.")
 
             # 4. 매도 전략 판별 (본절보호 -> 손절 -> 트레일링 스톱 -> 익절 순) 
+            signal_type = pos_data.get('signal_type', '상향돌파')
+
+            # [동적 매도 파라미터 적용]
+            if signal_type == "눌림목반등":
+                dyn_stop = -1.2
+                dyn_trailing_activation = 1.0
+                dyn_trailing_callback = 0.5
+                dyn_target = 1.6
+            else:
+                dyn_stop = self.STOP_LOSS * 100.0
+                dyn_trailing_activation = self.TRAILING_STOP_ACTIVATION * 100.0
+                dyn_trailing_callback = self.TRAILING_STOP_CALLBACK * 100.0
+                dyn_target = self.TARGET_PROFIT * 100.0
+
             # [A] 하드 스톱 또는 본절가 보호 청산
-            current_stop_limit = self.BREAKEVEN_PROTECT * 100.0 if pos_data['reached_breakeven'] else self.STOP_LOSS * 100.0
+            current_stop_limit = self.BREAKEVEN_PROTECT * 100.0 if pos_data['reached_breakeven'] else dyn_stop
             
             if profit_rate <= current_stop_limit:
                 p_type = "공식" if is_official else "추정"
@@ -278,8 +294,8 @@ class ExecutionManager:
                 self.execute_sell(code, pipeline, sell_type=s_type)
                 
             # [B] 트레일링 스톱 (실질 고점 수익률 % 도달 후 고점 대비 % 하락 시 매도)
-            elif high_net_profit_rate >= self.TRAILING_STOP_ACTIVATION * 100.0 and current_price < high_price * (1.0 - self.TRAILING_STOP_CALLBACK):
-                self.logger.info(f"[{code}] 트레일링 스톱 발동 (실질고점 {high_net_profit_rate:.2f}% -> 현재 {profit_rate:.2f}%, 하락폭 {self.TRAILING_STOP_CALLBACK*100:.1f}%)")
+            elif high_net_profit_rate >= dyn_trailing_activation and profit_rate <= high_net_profit_rate - dyn_trailing_callback:
+                self.logger.info(f"[{code}] 트레일링 스톱 발동 (실질고점 {high_net_profit_rate:.2f}% -> 현재 {profit_rate:.2f}%, 고점대비 하락폭 {dyn_trailing_callback:.1f}%)")
                 self.execute_sell(code, pipeline, sell_type="트레일링스톱")
             
             # [v5.4] [B-2] 스마트 익절 (BB 상단 터치 & 순익권)
@@ -287,10 +303,10 @@ class ExecutionManager:
                 self.logger.info(f"[{code}] [SMART] BB 상단 터치 스마트 익절 발동 ({profit_rate:.2f}%)")
                 self.execute_sell(code, pipeline, sell_type="스마트익절_BB상단")
  
-            # [C] 고정 익절 (환경변수 기준 익절)
-            elif profit_rate >= self.TARGET_PROFIT * 100.0:
+            # [C] 고정 익절
+            elif profit_rate >= dyn_target:
                 p_type = "공식" if is_official else "추정"
-                self.logger.info(f"[{code}] {p_type} 실질 익절선({self.TARGET_PROFIT*100:.1f}%) 도달 ({profit_rate:.2f}%) -> 청산")
+                self.logger.info(f"[{code}] {p_type} 실질 익절선({dyn_target:.1f}%) 도달 ({profit_rate:.2f}%) -> 청산")
                 self.execute_sell(code, pipeline, sell_type="익절")
 
     def monitor_pending_orders(self):
@@ -373,6 +389,14 @@ class ExecutionManager:
                         net_pnl = (avg_buy_price * qty) * (net_profit_rate / 100.0)
                         pnl_info = f" | 실질수익: {int(net_pnl):+,}원 ({net_profit_rate:+.2f}%)"
                         self.positions[code]['qty'] -= qty
+                        
+                        # [즉시 반영] 체결 시 서버 opt10074의 지연시간 대기 없이 당일 실현손익 먼저 업데이트
+                        if self.daily_pnl is None:
+                            self.daily_pnl = 0
+                        self.daily_pnl += int(net_pnl)
+                        
+                        if self.positions[code]['qty'] <= 0:
+                            del self.positions[code]
 
             # 서버 동기화 (실매매인 경우)
             if not self.is_dry_run:

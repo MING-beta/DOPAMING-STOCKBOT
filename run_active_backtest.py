@@ -78,7 +78,7 @@ def main():
         return
     
     # 각 종목당 할당 자산 (포트폴리오 개념)
-    PER_STOCK_BALANCE = 10000000 
+    PER_STOCK_BALANCE = 5000000 
     TOTAL_INITIAL_BALANCE = PER_STOCK_BALANCE * len(TARGET_CODES)
     friction = float(os.getenv("TRADING_FRICTION", "0.009"))
     

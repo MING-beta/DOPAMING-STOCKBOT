@@ -77,14 +77,27 @@ class BacktestEngine:
                 # [로깅 최적화] 보유 시 실시간 수익률 기록 생략
                 # self.logger.debug(f"   >> ROI:{profit_rate*100:.2f}% | High:{high_price:,.0f} | BreakEven:{reached_breakeven}")
 
+                # [v11.0] 시그널에 따른 동적 손익절 파라미터 적용
+                signal = pos.get('signal_type', '상향돌파')
+                if signal == '눌림목반등':
+                    current_target = 0.016
+                    current_stop_limit = -0.012
+                    current_trailing_activation = 0.010
+                    current_trailing_callback = 0.005
+                else:
+                    current_target = self.target_profit
+                    current_stop_limit = self.stop_loss
+                    current_trailing_activation = trailing_activation_rate
+                    current_trailing_callback = trailing_callback
+
                 # 최고가 갱신 (트레일링용)
                 if current_price > high_price:
                     high_price = current_price
                 
                 # A. 익절 판별
-                if profit_rate >= self.target_profit:
+                if profit_rate >= current_target:
                     next_open = df_1m['open'].iloc[i+1]
-                    self.logger.info(f"[{code}] [SELL] 익절 목표 도달: {profit_rate*100:.2f}%")
+                    self.logger.info(f"[{code}] [SELL] 익절 목표 도달 ({signal}): {profit_rate*100:.2f}%")
                     self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
                     reached_breakeven = False
                     trailing_activated = False
@@ -94,7 +107,7 @@ class BacktestEngine:
                 bb_upper = df_1m['BB_Upper'].iloc[i]
                 if current_price >= bb_upper and profit_rate > 0.012: # 수수료 0.9% + 순익 0.3% 보장 시
                     next_open = df_1m['open'].iloc[i+1]
-                    self.logger.info(f"[{code}] [SELL] [SMART] BB 상단 터치 익절: {profit_rate*100:.2f}%")
+                    self.logger.info(f"[{code}] [SELL] [SMART] BB 상단 터치 익절 ({signal}): {profit_rate*100:.2f}%")
                     self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
                     reached_breakeven = False
                     trailing_activated = False
@@ -119,17 +132,17 @@ class BacktestEngine:
                     reached_breakeven = True
                     self.logger.debug(f"[{code}] [SHIELD] 본절가 보호 시작 (+{self.breakeven_trigger*100:.1f}% 도달)")
                 
-                if not trailing_activated and profit_rate >= trailing_activation_rate:
+                if not trailing_activated and profit_rate >= current_trailing_activation:
                     trailing_activated = True
-                    self.logger.debug(f"[{code}] [TRAILING] 추적 익절 활성화 (+{trailing_activation_rate*100:.1f}% 도달)")
+                    self.logger.debug(f"[{code}] [TRAILING] 추적 익절 활성화 (+{current_trailing_activation*100:.1f}% 도달)")
                 
                 # D. 트레일링 스탑 청산 판별
                 if trailing_activated:
-                    trailing_stop_price = high_price * (1.0 - trailing_callback)
+                    trailing_stop_price = high_price * (1.0 - current_trailing_callback)
                     if current_price <= trailing_stop_price:
                         next_open = df_1m['open'].iloc[i+1]
                         real_price_profit = (next_open - buy_price) / buy_price
-                        self.logger.info(f"[{code}] [SELL] [TRAILING] 고점({high_price:,.0f}) 대비 하락 청산 (변동률: {real_price_profit*100:.2f}%)")
+                        self.logger.info(f"[{code}] [SELL] [TRAILING] 고점({high_price:,.0f}) 대비 하락 청산 ({signal}, 변동률: {real_price_profit*100:.2f}%)")
                         self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
                         reached_breakeven = False
                         trailing_activated = False
@@ -140,7 +153,7 @@ class BacktestEngine:
                 if 5 <= hold_duration < self.exit_minutes:
                     if profit_rate < 0.010: 
                         next_open = df_1m['open'].iloc[i+1]
-                        self.logger.info(f"[{code}] [SELL] [DEADZONE] 5분 내 수익권 미진출로 탈출 (수익률: {profit_rate*100:.2f}%)")
+                        self.logger.info(f"[{code}] [SELL] [DEADZONE] 5분 내 수익권 미진출로 탈출 ({signal}, 수익률: {profit_rate*100:.2f}%)")
                         self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
                         reached_breakeven = False
                         trailing_activated = False
@@ -150,17 +163,17 @@ class BacktestEngine:
                 # 진입 시점(buy_time)으로부터 설정한 시간이 지났는지 체크
                 if hold_duration >= self.exit_minutes:
                     next_open = df_1m['open'].iloc[i+1]
-                    self.logger.info(f"[{code}] [SELL] [TIME-CUT] 보유 시간 초과 ({int(hold_duration)}분) 강제 청산 (수익률: {profit_rate*100:.2f}%)")
+                    self.logger.info(f"[{code}] [SELL] [TIME-CUT] 보유 시간 초과 ({int(hold_duration)}분) 강제 청산 ({signal}, 수익률: {profit_rate*100:.2f}%)")
                     self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
                     reached_breakeven = False
                     trailing_activated = False
                     continue
 
                 # G. 손절/본절가 청산 판별 (v6.0: 본절 시 수수료 포함 +0.1% Net 수익 구간 보호)
-                current_stop_limit = 0.010 if reached_breakeven else self.stop_loss
-                if profit_rate <= current_stop_limit:
+                applied_stop_limit = 0.010 if reached_breakeven else current_stop_limit
+                if profit_rate <= applied_stop_limit:
                     next_open = df_1m['open'].iloc[i+1]
-                    self.logger.info(f"[{code}] [SELL] 손절/본절가 도달: {profit_rate*100:.2f}% (Limit: {current_stop_limit*100:.2f}%)")
+                    self.logger.info(f"[{code}] [SELL] 손절/본절가 도달 ({signal}): {profit_rate*100:.2f}% (Limit: {applied_stop_limit*100:.2f}%)")
                     self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
                     reached_breakeven = False
                     trailing_activated = False
@@ -181,16 +194,18 @@ class BacktestEngine:
             # analyze 함수 내부에서 다시 지표를 계산하지 않도록 stefano_strategy 수정 필요
             sliced_1m = df_1m.iloc[:i+1]
             sliced_5m = df_5m_full[df_5m_full.index <= current_time]
-            buy_signal = self.strategy.analyze(code, sliced_1m, sliced_5m)
+            is_signal, signal_type = self.strategy.analyze(code, sliced_1m, sliced_5m)
             
-            if buy_signal:
+            # [버그 픽스] 중복 매수 방지 및 시그널 튜플 파싱
+            if is_signal and code not in self.broker.positions:
                 next_open = df_1m['open'].iloc[i+1]
-                target_budget = self.broker.get_total_asset_value({code: current_price}) * 0.1
+                # [백테스트] 투자금 풀매수 (종목당 할당된 500만원을 100% 한 번에 진입)
+                target_budget = self.broker.balance * 0.99
                 qty = int(target_budget / next_open)
                 
                 if qty > 0:
-                    self.logger.info(f"[{code}] [BUY] 진입 완료: {next_open:,.0f} | 수량: {qty}주")
-                    self.broker.buy(code, next_open, qty, df_1m.index[i+1])
+                    self.logger.info(f"[{code}] [BUY] 진입 완료 ({signal_type}): {next_open:,.0f} | 수량: {qty}주")
+                    self.broker.buy(code, next_open, qty, df_1m.index[i+1], signal_type=signal_type)
                     high_price = next_open
 
         self.logger.info(f"--- [{code}] 백테스트 종료 ---")

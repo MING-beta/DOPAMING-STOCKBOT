@@ -161,9 +161,10 @@ def main():
                         all_data = pipeline.batch_get_data(codes)
                         
                         for code, (df_1m, df_5m) in all_data.items():
-                            if strategy.analyze(code, df_1m, df_5m):
+                            is_signal, signal_type = strategy.analyze(code, df_1m, df_5m)
+                            if is_signal:
                                 # 매수 실행 (내부적으로 Throttler 큐를 사용하므로 스레드 안전)
-                                execution_manager.execute_buy(code, pipeline)
+                                execution_manager.execute_buy(code, pipeline, signal_type=signal_type)
                     except Exception as e:
                         logger.error(f"⚠️ [백그라운드 워커] 예외 발생: {e}")
                     finally:

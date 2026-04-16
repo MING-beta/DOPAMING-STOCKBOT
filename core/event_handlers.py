@@ -34,12 +34,41 @@ class EventHandler:
             cond_str = self.kc.dynamicCall("GetConditionNameList()")
             self.logger.info(f"보유 조건검색식 목록: {cond_str}")
             
-            # 검색식 목록 중 가장 첫 번째 조건식을 가져와 실시간 감시 시작
+            # 1. `.env`에서 타겟 조건식 이름들(콤마 구분) 불러오기
+            target_env = os.getenv("TARGET_CONDITION_NAME", "").strip()
+            target_names = [x.strip() for x in target_env.split(',')] if target_env else []
+            
+            # 검색식 목록 중 조건에 맞는 것을 모두 실행 (최대 10개까지 지원)
             if cond_str:
-                first_cond = cond_str.split(';')[0]
-                if '^' in first_cond:
-                    c_index, c_name = first_cond.split('^')
-                    self.kc.send_condition("0156", c_name, int(c_index), 1)
+                cond_list = cond_str.rstrip(';').split(';')
+                launched_count = 0
+                
+                for cond in cond_list:
+                    if '^' in cond:
+                        idx, name = cond.split('^')
+                        
+                        # 타겟 리스트가 비어있으면(미설정 시) 맨 첫 번째 것만 실행 (Fallback)
+                        if not target_names and launched_count == 0:
+                            self.logger.info(f"🎯 [기본모드] 타겟 조건검색식 발견: 인덱스 {int(idx):03d} / {name}")
+                            self.kc.send_condition("0156", name, int(idx), 1)
+                            launched_count += 1
+                            break
+                            
+                        # 타겟 리스트 중 하나와 완전히 일치하거나 포함되면 실행
+                        if target_names:
+                            for target in target_names:
+                                if target in name or target == idx:
+                                    self.logger.info(f"🎯 [.env 매칭] 타겟 조건검색식 발견: 인덱스 {int(idx):03d} / {name}")
+                                    self.kc.send_condition("0156", name, int(idx), 1)
+                                    launched_count += 1
+                                    time.sleep(0.3) # TR 전송 제한 보호
+                                    break
+                
+                if launched_count == 0 and cond_list:
+                    # 설정한 이름과 일치하는게 아무것도 없을 때의 최후의 수단
+                    fallback_idx, fallback_name = int(cond_list[0].split('^')[0]), cond_list[0].split('^')[1]
+                    self.logger.warning(f"⚠️ 일치하는 조건식이 없어 1번 조건식({fallback_name})을 강제 구동합니다.")
+                    self.kc.send_condition("0156", fallback_name, fallback_idx, 1)
         else:
             self.logger.error(f"조건검색식 로드 실패 ({sMsg})")
 
@@ -169,16 +198,26 @@ class EventHandler:
                 if fluctuation_str:
                     fluctuation_rate = float(fluctuation_str.replace('+', ''))
                     if fluctuation_rate >= 29.8:
-                        if sCode not in self.kc.blacklisted_codes:
-                            self.logger.warning(f"🚫 [상한가 도달] {sCode} 종목이 상한가({fluctuation_rate}%)에 도달하여 감시를 영구 종료 및 제외합니다.")
-                            self.kc.blacklisted_codes.add(sCode)
+                        # [BUG FIX] 보유 중인 종목이면 상한가라도 실시간 수신을 해제하면 안됨! (익/손절 추적을 위해 필수)
+                        is_holding = False
+                        if self.kc.execution_manager and sCode in self.kc.execution_manager.positions:
+                            is_holding = True
                             
-                            if sCode in self.kc.monitored_codes:
-                                del self.kc.monitored_codes[sCode]
-                                self.kc.set_real_remove("1000", sCode)
-                                if self.kc.data_pipeline:
-                                    self.kc.data_pipeline.remove_code(sCode)
-                        return # 상한가 종목은 틱 데이터 파이프라인 누적 컨텍스트에서 드롭
+                        # 아직 매수 안한 남의 종목이 상한가 쳤을 때만 관심 끄기
+                        if not is_holding:
+                            if sCode not in self.kc.blacklisted_codes:
+                                self.logger.warning(f"🚫 [상한가 도달] {sCode} 종목이 상한가({fluctuation_rate}%)에 도달하여 신규 진입 감시를 영구 제외합니다.")
+                                self.kc.blacklisted_codes.add(sCode)
+                                
+                                if sCode in self.kc.monitored_codes:
+                                    del self.kc.monitored_codes[sCode]
+                                    self.kc.set_real_remove("1000", sCode)
+                                    if self.kc.data_pipeline:
+                                        self.kc.data_pipeline.remove_code(sCode)
+                            return # 상한가 종목은 틱 데이터 무시
+                        else:
+                            # 보유 종목이면 틱 통과시킴
+                            pass
 
                 # 하락일 경우 음수가 올 수 있어 절댓값 처리
                 price = abs(int(price_str))
@@ -212,10 +251,14 @@ class EventHandler:
                 # 주문 상태가 '체결'에 도달했고 체결량이 발생했을 때만 기록
                 if order_status == "체결" and exec_price_str and exec_qty_str:
                     try:
-                        price = int(exec_price_str)
-                        qty = int(exec_qty_str)
-                        order_qty = int(order_qty_str) if order_qty_str else qty
-                        cum_qty = int(cumulative_qty_str) if cumulative_qty_str else qty
+                        price = int(''.join(filter(str.isdigit, exec_price_str)) or 0)
+                        qty = int(''.join(filter(str.isdigit, exec_qty_str)) or 0)
+                        
+                        o_qty_clean = ''.join(filter(str.isdigit, order_qty_str))
+                        order_qty = int(o_qty_clean) if o_qty_clean else qty
+                        
+                        c_qty_clean = ''.join(filter(str.isdigit, cumulative_qty_str))
+                        cum_qty = int(c_qty_clean) if c_qty_clean else qty
                         
                         if price > 0 and qty > 0 and self.kc.execution_manager:
                             self.kc.execution_manager.record_execution(
@@ -340,9 +383,17 @@ class EventHandler:
                 try:
                     official_pnl = int(pnl_str)
                     self.kc.official_daily_pnl = official_pnl # 공식 손익 저장
+                    
                     if self.kc.execution_manager:
-                        self.kc.execution_manager.daily_pnl = official_pnl # 대시보드 연동용 변수 동기화
-                    self.logger.info(f"📊 [공식 수익 동기화] 오늘 실현 손익: {official_pnl:,} 원")
+                        # [핵심] 키움 모의투자는 사고팔때 도합 0.7%~0.9%에 달하는 터무니없는 가짜 수수료를 차감합니다.
+                        # 따라서 실전(0.25%) 기준으로 로컬에서 정밀 산출된 daily_pnl을 모의투자 서버 데이터가 덮어쓰지 못하도록 방어합니다.
+                        is_mock = getattr(self.kc, 'is_mock', False)
+                        if not is_mock:
+                            self.kc.execution_manager.daily_pnl = official_pnl # 실전일 때만 동기화
+                            self.logger.info(f"📊 [공식 수익 동기화] 오늘 실현 손익: {official_pnl:,} 원")
+                        else:
+                            self.logger.info(f"📊 [모의투자 PnL 무시] 서버상 손익: {official_pnl:,}원 (대시보드는 실전 0.25% 기준 자체 계산값 유지)")
+
                 except ValueError:
                     self.logger.error("❌ [공식 수익 동기화 오류] 숫자 변환 실패")
             return

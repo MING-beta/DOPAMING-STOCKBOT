@@ -310,12 +310,23 @@ class EventHandler:
             # [최종 해결] 불확실한 API 요약 필드 대신, 현금과 각 종목 평가액을 직접 합산함
             total_stock_eval = 0
             
-            # (A) 먼저 싱글 데이터에서 '평가금액합계' 혹은 '평가금액'을 시도 (보조적 확인용)
-            summary_eval = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, 0, "평가금액").strip()
-            summary_eval_int = int(summary_eval) if summary_eval and summary_eval.isdigit() else 0
+            # (A) 싱글 데이터에서 MTS 요약 정보 파싱
+            def _get_single(field_name):
+                v = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, 0, field_name).strip()
+                try: return int(v) if v else 0
+                except: return 0
+            
+            summary_eval_int = _get_single("평가금액")
+            self.kc.mts_estimated_assets = _get_single("추정예탁자산")
+            self.kc.mts_total_purchase = _get_single("총매입금액")
+            self.kc.mts_total_eval = _get_single("총평가금액")
 
             data_cnt = self.kc.dynamicCall("GetRepeatCnt(QString, QString)", sTrCode, sRQName)
             server_pos = {}
+            
+            # [신규] 상장폐지/정리매매 허수 자산 차감용 변수
+            bad_stock_purchase = 0
+            bad_stock_eval = 0
             for i in range(data_cnt):
                 code_str = self.kc.dynamicCall("GetCommData(QString, QString, int, QString)", sTrCode, sRQName, i, "종목번호").strip()
                 if code_str.startswith("A"): code_str = code_str[1:]
@@ -336,6 +347,11 @@ class EventHandler:
                     price = int(price_str)
                     cur_price = abs(int(cur_price_str)) if cur_price_str else price
                     
+                    market_state = self.kc.dynamicCall("GetMasterStockState(QString)", code_str)
+                    if market_state and ("상장폐지" in market_state or "정리매매" in market_state):
+                        bad_stock_purchase += (price * qty)
+                        bad_stock_eval += eval_amount
+                    
                     try:
                         # [v11.5 ROOT CAUSE FIX] 키움 opw00018 수익률(%)은 실제 퍼센트의 100배 값으로 반환됨
                         # 예: -0.51% → API가 "-51" 반환 → /100 하여 -0.51로 변환
@@ -351,15 +367,24 @@ class EventHandler:
                             'api_profit_rate': api_profit_rate, 'api_pnl': api_pnl
                         }
             
-            # (B) 최종 자산 재구성: 가용 현금(opw00001 기반) + 계산된 주식 평가 합계
-            # 만약 직접 합산한 값이 요약 데이터보다 크면 직접 합산값 사용 (안전벨트)
-            final_stock_val = max(summary_eval_int, total_stock_eval)
-            total_assets = self.kc.available_cash + final_stock_val
+            # (B-1) 허수 데이터 차감 보정
+            if bad_stock_purchase > 0 or bad_stock_eval > 0:
+                self.kc.mts_total_purchase -= bad_stock_purchase
+                self.kc.mts_total_eval -= bad_stock_eval
+                summary_eval_int -= bad_stock_eval
+                self.logger.info(f"🗑️ [상장폐지 필터 적용] 쓰레기 매입금(-{bad_stock_purchase:,}원), 쓰레기 평가금(-{bad_stock_eval:,}원) 삭감 완료")
+
+            # (B-2) 최종 자산 재구성: MTS "추정예탁자산"이 최우선
+            if self.kc.mts_estimated_assets and self.kc.mts_estimated_assets > 0:
+                total_assets = self.kc.mts_estimated_assets
+            else:
+                final_stock_val = max(summary_eval_int, total_stock_eval)
+                total_assets = self.kc.available_cash + final_stock_val
             
             if total_assets > 10000: # 최소 1만원 이상일 때만 유효 조치
                 self.kc.initial_total_assets = total_assets
                 self.kc.reserved_cash = 0
-                self.logger.info(f"💎 [자산 재구성 완료] 총자산: {total_assets:,} 원 (현금:{self.kc.available_cash:,} + 주식합계:{final_stock_val:,})")
+                self.logger.info(f"💎 [자산 재구성 완료] 추정자산: {total_assets:,} 원 (매입:{self.kc.mts_total_purchase:,} | 평가:{self.kc.mts_total_eval:,})")
             
             # 서버에서 받은 실제 실시간 잔고를 매니저에 덮어씌움
             if self.kc.execution_manager:

@@ -295,6 +295,17 @@ def main():
                 logger.info("🤖 AI 모델 일일 재학습 시작 (백그라운드)...")
                 ai_engine.train_model()
                 
+                # [v11.3 Nightly Optimizer] 장 종료 후 다음 날의 최적 파라미터 탐색 (백그라운드 프로세스)
+                try:
+                    import subprocess
+                    optimizer_path = os.path.join(os.path.dirname(__file__), "tools", "nightly_optimizer.py")
+                    if os.path.exists(optimizer_path):
+                        logger.info("🌙 Nightly Optimizer 가동: 내일의 최적 파라미터를 탐색합니다...")
+                        subprocess.Popen([sys.executable, optimizer_path], 
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception as opt_e:
+                    logger.error(f"⚠️ Nightly Optimizer 실행 실패: {opt_e}")
+                
             # 자정(00:00)에 다음날을 위해 플래그 초기화
             elif now_str == "00:00":
                 notification_flags["market_open"] = False

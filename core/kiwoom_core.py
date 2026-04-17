@@ -49,6 +49,12 @@ class KiwoomCore(QAxWidget):
         # 초기 총 자산 (리스크 가드 기준점)
         self.initial_total_assets = 0
         
+        # [v11.5] MTS/API 요약 데이터 저장용
+        self.mts_estimated_assets = 0
+        self.mts_total_purchase = 0
+        self.mts_total_eval = 0
+        self.official_daily_pnl = 0
+        
         # Kiwoom OpenAPI+ 제어기 (COM 오브젝트) 생성
         success = self.setControl("KHOPENAPI.KHOpenAPICtrl.1")
         

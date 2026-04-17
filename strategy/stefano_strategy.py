@@ -22,6 +22,9 @@ class StefanoStrategy:
     def __init__(self, check_window=60):
         self.logger = logging.getLogger("DopamingBot.StefanoStrategy")
         self.check_window = check_window
+        # [v11.4] HFS Golden Ratio 필터 (추세 강도 임계치)
+        self.HFS_GOLDEN_RATIO = 0.618
+
         # 거시적(5분봉) 다이버전스 상태 캐싱 {code: bool}
         self.macro_states = {}
         # 지표 계산 결과 캐싱 { (code, timeframe): (last_index, df_result) }
@@ -186,6 +189,13 @@ class StefanoStrategy:
             adj_min_recovery = self.min_recovery_rate * 0.5 if self.is_aggressive else self.min_recovery_rate
             is_v_bottom = (rsi_1m <= self.nitro_rsi_limit and is_rsi_hook and (last_price <= bb_lower * self.nitro_bb_gap) and (actual_recovery >= adj_min_recovery))
             is_entry_signal = (is_v_bottom or (micro_div and is_recovering)) and is_green_candle and is_macro_oversold
+
+            # [v11.4 HFS Golden Ratio] 변동성 강도(Strength) 검증
+            # BB Width와 RSI를 조합한 상대 강도가 황금비(0.618)를 넘어야 진정한 분출로 인정
+            relative_strength = (rsi_1m / 100.0) / (bb_width * 10.0 + 1e-9)
+            if relative_strength < self.HFS_GOLDEN_RATIO:
+                self.logger.debug(f"[{code}] [HFS] 강도 미달 ({relative_strength:.3f} < {self.HFS_GOLDEN_RATIO}) - 진입 차단")
+                return False, ""
 
             if self.strategy_mode == "BREAKOUT":
                 # [v9.2 Macro Precision] 5분봉 단기/중기 정배열 컨펌 (승률 향상)

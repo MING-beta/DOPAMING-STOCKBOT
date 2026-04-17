@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(base_dir)
 
-from utils.notifier import SlackNotifier
+from utils.notifier import SystemNotifier
 from tools.nightly_optimizer import NightlyOptimizer
 
 def run_nightly_optimization():
@@ -38,8 +38,8 @@ def send_morning_briefing():
 잠시 후 09:00분, 스캘핑 엔진이 활성화됩니다.
 건승을 기원합니다! 🚀"""
 
-    print("슬랙 발송을 시도합니다...")
-    notifier = SlackNotifier()
+    print("슬랙 및 텔레그램 발송을 시도합니다...")
+    notifier = SystemNotifier()
     notifier.send_message_sync(msg)
     print("모닝 브리핑 발송 완료!")
 

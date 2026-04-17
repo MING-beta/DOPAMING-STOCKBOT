@@ -41,3 +41,57 @@ class SlackNotifier:
             requests.post(self.webhook_url, json=payload, timeout=5)
         except Exception as e:
             self.logger.error(f"Slack 통지 발송 중 에러 발생: {e}")
+
+class TelegramNotifier:
+    def __init__(self):
+        self.logger = logging.getLogger("DopamingBot.TelegramNotifier")
+        load_dotenv()
+        self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("TELEGRAM_TOKEN", "").strip()
+        self.chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        if self.bot_token and self.chat_id:
+            self.api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        else:
+            self.api_url = None
+
+    def send_message(self, message: str):
+        """Telegram HTTP API를 통해 비동기로 메시지를 전송합니다."""
+        if not self.api_url:
+            return
+            
+        def _send():
+            try:
+                payload = {"chat_id": self.chat_id, "text": message}
+                response = requests.post(self.api_url, json=payload, timeout=5)
+                if response.status_code != 200:
+                    self.logger.error(f"Telegram 통지 실패: HTTP {response.status_code} - {response.text}")
+            except Exception as e:
+                self.logger.error(f"Telegram 통지 발송 중 에러 발생: {e}")
+                
+        threading.Thread(target=_send, daemon=True).start()
+
+    def send_message_sync(self, message: str):
+        """Telegram HTTP API를 통해 동기식으로 메시지를 전송합니다."""
+        if not self.api_url:
+            return
+        try:
+            payload = {"chat_id": self.chat_id, "text": message}
+            response = requests.post(self.api_url, json=payload, timeout=5)
+            if response.status_code != 200:
+                self.logger.error(f"Telegram 통지 실패: HTTP {response.status_code} - {response.text}")
+        except Exception as e:
+            self.logger.error(f"Telegram 통지 발송 중 에러 발생: {e}")
+
+class SystemNotifier:
+    """Slack과 Telegram 모두에게 메시지를 전송하는 통합 알림 퍼사드 클래스"""
+    def __init__(self):
+        self.slack = SlackNotifier()
+        self.telegram = TelegramNotifier()
+
+    def send_message(self, message: str):
+        self.slack.send_message(message)
+        self.telegram.send_message(message)
+
+    def send_message_sync(self, message: str):
+        self.slack.send_message_sync(message)
+        self.telegram.send_message_sync(message)
+

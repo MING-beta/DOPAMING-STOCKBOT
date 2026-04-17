@@ -15,7 +15,7 @@ from core.data_pipeline import DataPipeline
 from strategy.stefano_strategy import StefanoStrategy
 from core.execution_manager import ExecutionManager
 from core.persistence import DatabaseManager
-from utils.notifier import SlackNotifier
+from utils.notifier import SystemNotifier
 from utils.logger import setup_logger, add_gui_logger
 from ui.dashboard import Dashboard
 from utils.report_generator import ReportGenerator
@@ -57,7 +57,7 @@ def main():
         kiwoom.set_data_pipeline(pipeline)
         
         # 6. 알림 및 영속성(DB) 시스템 초기화
-        slack = SlackNotifier()
+        slack = SystemNotifier()
         db = DatabaseManager()
         
         # 환경변수 로드 및 검증

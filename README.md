@@ -138,6 +138,10 @@ python main.py
 > - `[Update]`: 기존 로직 상향/수치 조정
 > - `[Fix]`: 버그 및 통신 오류 수정
 
+### [v11.5] Telegram Integration - 2026.04.17
+- **[New]** 슬랙(Slack) 환경에 더해 텔레그램(Telegram) 푸시 알람 동시 발송 모듈 추가 (SystemNotifier 파사드 도입)
+- **[Update]** 환경 변수 `.env` 설정에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 맵핑 지원 (하위 호환성 위해 `TELEGRAM_TOKEN` 변수명도 대응)
+
 ### [v11.3] Nightly Daemon & UI Overhaul - 2026.04.16
 - **[New]** 무소음 백그라운드 야간 최적화 데몬 구축 및 대시보드 상태창 활성화
 - **[Update]** 무중단 파라미터 핫 리로드(Hot-Reloading) 로직을 적용해 앱 재시작 없이 .env 실시간 동기화

@@ -281,15 +281,38 @@ class ExecutionManager:
             
             is_mock = getattr(self.kiwoom, 'is_mock', False)
             
-            # [Net ROI 공식 통합] 실전거래일 때만 서버 수익률을 우선 사용하고, 모의투자일 땐 가짜 수수료(0.9%) 기반 데이터를 무시
+            # [v11.5] 매수 후 5초 Grace Period - 파이프라인 초기화 대기
+            buy_time = pos_data.get('buy_time')
+            if buy_time and (time.time() - buy_time) < 5:
+                continue
+            
+            # [v11.5] 항상 자체계산을 먼저 수행
+            simple_rate = (((current_price - buy_price) / buy_price) * 100.0) - (self.TRADING_FRICTION * 100.0)
+            
+            # [v11.5] API↔자체계산 교차검증
             if 'api_profit_rate' in pos_data and not is_mock:
-                profit_rate = pos_data['api_profit_rate']
-                is_official = True
+                api_rate = pos_data['api_profit_rate']
+                if api_rate is not None and abs(api_rate - simple_rate) <= 5.0:
+                    profit_rate = api_rate
+                    is_official = True
+                else:
+                    # 괴리 5%p 초과 → 자체계산 우선
+                    if api_rate is not None:
+                        self.logger.warning(f"⚠️ [{code}] API 수익률({api_rate:.2f}%) vs 자체계산({simple_rate:.2f}%) 괴리 {abs(api_rate - simple_rate):.1f}%p → 자체계산 사용")
+                    profit_rate = simple_rate
+                    is_official = False
             else:
-                # API 데이터가 아직 동기화 전이거나 모의투자 환경일 때 자체 계산 (실제 0.25% 공제)
-                # (Formula: (current - buy) / buy * 100 - (FRICTION * 100))
-                profit_rate = (((current_price - buy_price) / buy_price) * 100.0) - (self.TRADING_FRICTION * 100.0)
+                profit_rate = simple_rate
                 is_official = False
+            
+            # [v11.5] ±15% 이상치 절대 차단 (공식/추정 구분 없이)
+            if abs(profit_rate) > 15.0:
+                self.logger.error(f"🚫 [{code}] 수익률 이상치 차단: {profit_rate:.2f}% (±15% 초과, 데이터 오류 의심)")
+                continue
+            
+            # [v11.5 디버그] 매도 판단 직전 핵심 변수 로깅
+            p_type = "공식" if is_official else "추정"
+            self.logger.debug(f"[{code}] 수익률: buy={buy_price:,} cur={current_price:,} rate={profit_rate:+.2f}% ({p_type})")
             
             # 1. 최고가(High Price) 및 실질 최고 수익률(High Net Profit) 갱신
             if 'high_price' not in pos_data:

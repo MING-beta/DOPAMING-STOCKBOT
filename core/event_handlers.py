@@ -337,7 +337,9 @@ class EventHandler:
                     cur_price = abs(int(cur_price_str)) if cur_price_str else price
                     
                     try:
-                        api_profit_rate = float(profit_rate_str) if profit_rate_str else 0.0
+                        # [v11.5 ROOT CAUSE FIX] 키움 opw00018 수익률(%)은 실제 퍼센트의 100배 값으로 반환됨
+                        # 예: -0.51% → API가 "-51" 반환 → /100 하여 -0.51로 변환
+                        api_profit_rate = (float(profit_rate_str) / 100.0) if profit_rate_str else 0.0
                         api_pnl = int(pnl_str) if pnl_str else 0
                     except ValueError:
                         api_profit_rate = 0.0

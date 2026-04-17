@@ -589,8 +589,11 @@ class Dashboard(QMainWindow):
                     friction_pct = ex.TRADING_FRICTION * 100.0
                     net_rate = (((cur_p - buy_p) / buy_p) * 100.0) - friction_pct
                     
+                    # [v11.5 교차검증] API 수익률과 자체계산의 괴리가 5%p 이상이면 자체계산 우선
                     if 'api_profit_rate' in pos and not getattr(self.kiwoom, 'is_mock', False):
-                        net_rate = pos['api_profit_rate']
+                        api_rate = pos['api_profit_rate']
+                        if api_rate is not None and abs(api_rate - net_rate) <= 5.0:
+                            net_rate = api_rate
                         
                     unrealized_net_pnl = (buy_p * qty) * (net_rate / 100.0)
                     total_unrealized_pnl += unrealized_net_pnl
@@ -754,18 +757,22 @@ class Dashboard(QMainWindow):
             
             # [최적화] 모든 계산에 일관된 '실질 수익률(Net ROI)'을 사용하기 위해 내부 함수 정의
             def get_net_roi(c, p):
-                if 'api_profit_rate' in p:
-                    # 키움 공식 수익률(제비용 포함) 사용
-                    return p['api_profit_rate']
-                
-                # API 데이터가 없으면 현재가 기반으로 계산 (설정된 마찰 비용 차감)
+                # [v11.5] 항상 자체계산을 기본으로 하고, API와 교차검증
                 cp = p.get('current_price', p['buy_price'])
                 d_tuple = all_data.get(c) 
                 if d_tuple and d_tuple[0] is not None and not d_tuple[0].empty:
                     cp = d_tuple[0]['close'].iloc[-1]
                 
                 friction_pct = self.execution_manager.TRADING_FRICTION * 100.0
-                return ((cp - p['buy_price']) / p['buy_price'] * 100.0) - friction_pct
+                simple_rate = ((cp - p['buy_price']) / p['buy_price'] * 100.0) - friction_pct
+                
+                if 'api_profit_rate' in p and p['api_profit_rate'] is not None:
+                    api_rate = p['api_profit_rate']
+                    # API와 자체계산의 괴리가 5%p 이내면 API 사용, 아니면 자체계산
+                    if abs(api_rate - simple_rate) <= 5.0:
+                        return api_rate
+                
+                return simple_rate
 
             sorted_positions = sorted(
                 positions.items(),

@@ -1,4 +1,4 @@
-# 📈 DOPAMING-STOCK-BOT v11.4 [Ultra HF Scalping & True Physics Engine]
+# 📈 DOPAMING-STOCK-BOT v11.5 [Telegram Integration & Ultra HF Scalping]
 
 ## 📢 최근 릴리즈 노트 
 
@@ -141,6 +141,11 @@ python main.py
 ### [v11.5] Telegram Integration - 2026.04.17
 - **[New]** 슬랙(Slack) 환경에 더해 텔레그램(Telegram) 푸시 알람 동시 발송 모듈 추가 (SystemNotifier 파사드 도입)
 - **[Update]** 환경 변수 `.env` 설정에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 맵핑 지원 (하위 호환성 위해 `TELEGRAM_TOKEN` 변수명도 대응)
+
+### [v11.4] True Physics Engine & HFS - 2026.04.17
+- **[New]** 3D 입체 스캐너 (True Physics Engine) 백테스터 도입 ('생존 편향' 소멸)
+- **[Update]** 초고빈도 스캘핑 (HFS) 최적화로 1.8% 단기 익절 타격 로직 탑재
+- **[Update]** Whipsaw(휩소) 방어 위해 승률 필터링 강화 (`AI_THRESHOLD=0.40`)
 
 ### [v11.3] Nightly Daemon & UI Overhaul - 2026.04.16
 - **[New]** 무소음 백그라운드 야간 최적화 데몬 구축 및 대시보드 상태창 활성화

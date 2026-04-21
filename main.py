@@ -7,7 +7,8 @@ KiwoomCore, OpenAPI 통신, 데이터 파이프라인, 전략 매니저 및 GUI(
 
 import sys
 import os
-from datetime import datetime
+import json
+from datetime import datetime, date
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import QApplication
 from core.kiwoom_core import KiwoomCore
@@ -138,9 +139,17 @@ def main():
         def evaluate_strategy_and_positions():
             nonlocal is_analyzing
             
-            # [장 운영 시간 가드] 09:00 ~ 15:30 이외의 시간은 모든 매매 연산을 중단합니다.
+            # [장 운영 시간 가드] 05~08시(API 점검) 및 09:00~15:30 이외 시간은 모든 매매 연산을 중단합니다.
             now = datetime.now()
             if now.hour < 9 or (now.hour >= 15 and now.minute > 30) or now.hour >= 16:
+                return
+            # [API 점검 휴식] 05:00~08:00 키움 정기 점검 시간 - 어플리케이션 휴식
+            if 5 <= now.hour < 8:
+                return
+            
+            # [휴장일 가드] 영업일이 아니면 매매 연산 완전 중단
+            from utils.market_calendar import is_market_open
+            if not is_market_open()[0]:
                 return
 
             # 2. 매매 로직 집행 (백그라운드 스레드 위임)
@@ -179,7 +188,8 @@ def main():
 
         # (4) [데이터 보정] 과거 차트 누락 종목 자동 재동기화 (2분 주기)
         def repair_data_continuity():
-            if execution_manager.is_risk_halt: return
+            from utils.market_calendar import is_market_open
+            if execution_manager.is_risk_halt or not is_market_open()[0]: return
             
             with pipeline.lock:
                 # 현재 파이프라인에 등록된 모든 종목 체크
@@ -201,7 +211,8 @@ def main():
 
         # 13. 슬랙 푸시 알림: 시작, 종료 및 헬스체크 설정
         # (1) 시작 알림
-        slack.send_message("🚀 *알림*: `Dopaming-Stock-Bot` 시스템 구동이 시작되었습니다. (정상 작동 중)")
+        from utils.market_calendar import get_market_status_message
+        slack.send_message(f"🚀 *알림*: `Dopaming-Stock-Bot` 시스템 구동이 시작되었습니다. (정상 작동 중)\n\n{get_market_status_message()}")
 
         # (2) 앱 종료 알림 (동기 통신)
         def on_app_quit():
@@ -210,13 +221,82 @@ def main():
             slack.send_message_sync(msg)
         app.aboutToQuit.connect(on_app_quit)
 
+        # ─── [파일 기반 일일 알림 플래그] ───
+        # 재기동에도 당일 이미 발송한 알림은 중복 발송하지 않도록 파일로 관리
+        daily_flag_path = os.path.join(os.path.dirname(__file__), ".daily_notification_flags.json")
+        
+        def _load_daily_flags():
+            """파일에서 당일 알림 플래그를 로드. 날짜가 다르면 초기화."""
+            today_str = date.today().isoformat()
+            try:
+                if os.path.exists(daily_flag_path):
+                    with open(daily_flag_path, 'r', encoding='utf-8') as f:
+                        flags = json.load(f)
+                    if flags.get("date") == today_str:
+                        return flags
+            except (json.JSONDecodeError, IOError):
+                pass
+            # 날짜가 다르거나 파일 없으면 초기화
+            return {"date": today_str, "market_open": False, "market_close": False, "market_liquidation": False, "daily_briefing": False}
+        
+        def _save_daily_flags(flags):
+            """알림 플래그를 파일에 저장 (재기동 시에도 유지)"""
+            try:
+                with open(daily_flag_path, 'w', encoding='utf-8') as f:
+                    json.dump(flags, f, ensure_ascii=False)
+            except IOError as e:
+                logger.error(f"⚠️ 알림 플래그 저장 실패: {e}")
+        
+        notification_flags = _load_daily_flags()
+
         # (3) 1분 헬스체크 (통신 장애 확인 및 시간별 스케줄 알림)
-        notification_flags = {"market_open": False, "market_close": False}
         reconnect_attempts = 0
         MAX_RECONNECT_ATTEMPTS = int(os.getenv("RECONNECT_LIMIT", "5"))
+        api_maintenance_notified = False  # 05~08시 점검 알림 1회 제한
         
         def health_check():
-            nonlocal reconnect_attempts
+            nonlocal reconnect_attempts, notification_flags, api_maintenance_notified
+            now = datetime.now()
+            
+            # [C] 날짜가 바뀌면 플래그 자동 초기화 (자정 시점 뿐 아니라 날짜 변경 감지)
+            today_str = date.today().isoformat()
+            if notification_flags.get("date") != today_str:
+                notification_flags = {"date": today_str, "market_open": False, "market_close": False, "market_liquidation": False, "daily_briefing": False}
+                api_maintenance_notified = False
+                _save_daily_flags(notification_flags)
+                logger.info("🔄 [자정 리셋] 일일 알림 플래그가 새 날짜로 초기화되었습니다.")
+            
+            # [휴장일 체크]
+            from utils.market_calendar import is_market_open, get_market_status_message
+            is_open, _ = is_market_open()
+            
+            now_str = now.strftime("%H:%M")
+            # [D] 모닝 데일리 브리핑 발송 (08:00)
+            if now_str >= "08:00" and not notification_flags.get("daily_briefing"):
+                slack.send_message(get_market_status_message())
+                notification_flags["daily_briefing"] = True
+                _save_daily_flags(notification_flags)
+            
+            # 🔴 [휴장일 가드] 휴장일일 경우, 아래의 모든 서버 상태 검사 및 스케줄 작업을 건너뜁니다.
+            if not is_open:
+                return
+            
+            # [A-0] 05:00~08:00 키움 API 정기 점검 시간대 → 모든 활동 일시 중지
+            if 5 <= now.hour < 8:
+                if not api_maintenance_notified:
+                    maintenance_msg = "😴 *[정기 점검 휴식]* 05:00~08:00 키움 API 서버 정기 점검 시간입니다. 어플리케이션이 휴식 모드에 진입합니다. 08:00 이후 자동 복구됩니다."
+                    logger.info(maintenance_msg)
+                    slack.send_message(maintenance_msg)
+                    api_maintenance_notified = True
+                return  # 점검 시간에는 헬스체크 포함 모든 활동 건너뜀
+            
+            # [A-0.5] 08:00 이후 점검 종료 감지 → 카운터 초기화 및 자동 복구
+            if now.hour >= 8 and api_maintenance_notified:
+                logger.info("🔄 [점검 종료] 08:00 API 서버 점검 시간이 종료되었습니다. 어플리케이션을 정상 모드로 복귀합니다.")
+                slack.send_message("☀️ *[점검 종료]* 08:00 키움 API 점검이 종료되었습니다. 시스템이 정상 모드로 복귀하여 운영을 재개합니다.")
+                reconnect_attempts = 0
+                api_maintenance_notified = False
+            
             # [A] 서버 접속 상태 체크
             state = kiwoom.get_connect_state()
             if state == 0:
@@ -235,21 +315,25 @@ def main():
                         slack.send_message(success_msg)
                         reconnect_attempts = 0 # 횟수 초기화
                 else:
-                    fatal_msg = "🛑 *[치명적 에러]* 최대 재연결 시도 횟수를 초과했습니다. 시스템을 안전하게 종료합니다."
+                    # [핵심 수정] 최대 횟수 초과 시 타이머 정지하여 무한 반복 방지
+                    fatal_msg = f"🛑 *[치명적 에러]* 최대 재연결 시도 횟수({MAX_RECONNECT_ATTEMPTS}회)를 초과했습니다. 헬스체크를 중단하고 시스템을 안전하게 종료합니다."
                     logger.critical(fatal_msg)
                     slack.send_message(fatal_msg)
+                    health_timer.stop()  # 타이머 정지하여 더 이상 health_check가 호출되지 않음
                     app.quit()
+                    return  # app.quit() 이후 추가 로직 실행 방지
             else:
                 # 연결 상태 정상이면 횟수 초기화
-                reconnect_attempts = 0
+                if reconnect_attempts > 0:
+                    reconnect_attempts = 0
                 
-            # [B] 지정 시간(장시작/종료) 슬랙 알림
-            now_str = datetime.now().strftime("%H:%M")
-            if now_str == "09:00" and not notification_flags["market_open"]:
+            # [B] 지정 시간(장시작/종료) 슬랙 알림 - 평일에만 도달함
+            if now_str == "09:00" and not notification_flags.get("market_open"):
                 open_msg = "🌅 *[장 시작 알림]* 09:00 정규장 매매를 시작합니다. 오늘도 성투하세요!"
                 logger.info(open_msg)
                 slack.send_message(open_msg)
                 notification_flags["market_open"] = True
+                _save_daily_flags(notification_flags)
                 
             elif now_str == "15:19" and not notification_flags.get("market_liquidation"):
                 # [스마트 일괄 청산] 장 마감 동시호가(15:20) 직전인 15:19에 
@@ -257,8 +341,9 @@ def main():
                 logger.warning("🚨 [오버나잇 방지] 15:19 정규장 마감 1분 전! 스마트 청산 개시!")
                 execution_manager.smart_liquidate_positions(pipeline)
                 notification_flags["market_liquidation"] = True
+                _save_daily_flags(notification_flags)
                 
-            elif now_str >= "15:30" and not notification_flags["market_close"]:
+            elif now_str >= "15:30" and not notification_flags.get("market_close"):
                 # [장 종료 클리닝] 미체결 및 요청 큐 강제 정리
                 logger.info("🏁 15:30 장 종료 감지. 일일 리포트 생성을 시작합니다.")
                 kiwoom.throttler.clear_queue()
@@ -290,6 +375,7 @@ def main():
                 logger.info("장 종료 고도화 리포트 발송")
                 slack.send_message(report_msg)
                 notification_flags["market_close"] = True
+                _save_daily_flags(notification_flags)  # 파일에 저장하여 재기동 시에도 중복 발송 방지
 
                 # [AI 재학습] 장 종료 후 당일 데이터를 학습하여 모델 자동 업데이트
                 logger.info("🤖 AI 모델 일일 재학습 시작 (백그라운드)...")
@@ -305,12 +391,6 @@ def main():
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception as opt_e:
                     logger.error(f"⚠️ Nightly Optimizer 실행 실패: {opt_e}")
-                
-            # 자정(00:00)에 다음날을 위해 플래그 초기화
-            elif now_str == "00:00":
-                notification_flags["market_open"] = False
-                notification_flags["market_close"] = False
-                notification_flags["market_liquidation"] = False
                 
         health_timer = QTimer()
         health_timer.timeout.connect(health_check)

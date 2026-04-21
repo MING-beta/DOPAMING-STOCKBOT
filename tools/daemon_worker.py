@@ -28,14 +28,28 @@ def send_morning_briefing():
     stop_loss = float(os.getenv("TRADE_STOP_LOSS", "-0.020")) * 100
     ai_thresh = float(os.getenv("AI_THRESHOLD", "0.38"))
     
-    msg = f"""🌞 **[DOPAMING-STOCK-BOT] 장 시작 모닝 브리핑** 🌞
-오늘의 투자를 위해 야간에 탐색된 최적의 파라미터가 시스템에 장착되었습니다.
+    is_auto = os.getenv("AUTO_OPTIMIZE_MODE", "True").lower() == 'true'
+    
+    if is_auto:
+        msg = f"""🌞 **[DOPAMING-STOCK-BOT] 장 시작 모닝 브리핑** 🌞
+오늘의 투자를 위해 야간에 탐색된 최적의 파라미터가 시스템에 자동 장착되었습니다. (AUTO 모드)
 
 📈 **목표 익절가**: +{target_profit:.1f}%
 📉 **안전 손절가**: {stop_loss:.1f}%
 🤖 **AI 예측 임계치**: {ai_thresh:.2f}
 
 잠시 후 09:00분, 스캘핑 엔진이 활성화됩니다.
+건승을 기원합니다! 🚀"""
+    else:
+        msg = f"""🌞 **[DOPAMING-STOCK-BOT] 장 시작 모닝 브리핑** 🌞
+현재 시스템이 **MANUAL (수동) 모드**로 작동 중입니다.
+야간 데몬의 자동 최적화가 비활성화되었으며, 사용자가 지정한 고정 파라미터로 시장에 진입합니다.
+
+📍 **현재 고정 세팅값** (수동 유지)
+📈 **목표 익절가**: +{target_profit:.1f}%
+📉 **안전 손절가**: {stop_loss:.1f}%
+🤖 **AI 예측 임계치**: {ai_thresh:.2f}
+
 건승을 기원합니다! 🚀"""
 
     print("슬랙 및 텔레그램 발송을 시도합니다...")

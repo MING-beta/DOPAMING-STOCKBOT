@@ -22,26 +22,38 @@ class BacktestEngine:
         self.breakeven_trigger = float(os.getenv("TRADE_BREAKEVEN_TRIGGER", "0.01"))
         self.breakeven_stop    = float(os.getenv("TRADE_BREAKEVEN_PROTECT", "0.003"))
 
-        # [v4.7] 스캘핑 전용 타임컷(Time-Cut) 설정 (분)
-        self.exit_minutes      = int(os.getenv("STRATEGY_EXIT_MINUTES", "10"))
+        # [v4.7] 스캘핑 전용 타임컷(Time-Cut) 삭제 (VCP 추세 무한 보유 허용)
+        # self.exit_minutes = int(os.getenv("STRATEGY_EXIT_MINUTES", "10"))
+        
+        # [v12.0] 스마트 익절 / 데드존 파라미터화
+        self.smart_exit_min_profit = float(os.getenv("SMART_EXIT_MIN_PROFIT", "0.012"))
+        self.deadzone_minutes     = float(os.getenv("DEADZONE_MINUTES", "5"))
+        self.deadzone_min_profit  = float(os.getenv("DEADZONE_MIN_PROFIT", "0.010"))
         
         # [v5.1] 최적화: 로깅 레벨 체크용 플래그
         self.debug_enabled = self.logger.isEnabledFor(logging.DEBUG)
         
-        self.logger.info(f"[설정 로드] TP: {self.target_profit*100:.1f}%, SL: {self.stop_loss*100:.1f}%, Friction: {self.trading_friction*100:.2f}%, Exit: {self.exit_minutes}m")
+        self.logger.info(f"[설정 로드] TP: {self.target_profit*100:.1f}%, SL: {self.stop_loss*100:.1f}%, Friction: {self.trading_friction*100:.2f}%")
 
-    def run(self, code, df_1m):
-        """단일 종목 백테스트 실행"""
+    def run(self, code, df_1m, df_1m_pre=None, df_5m_pre=None):
+        """단일 종목 백테스트 실행
+        df_1m_pre/df_5m_pre: 사전 계산된 지표 DataFrame (그리드서치 고속 모드)
+        """
         self.logger.info(f"--- [{code}] 백테스트 시작 (데이터: {len(df_1m)}개) ---")
         
-        # 1. 5분봉 사전 리샘플링 (루프 밖으로 이동)
-        df_5m_full = df_1m.resample('5T').agg({
-            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-        }).dropna()
-        
-        # 지표 선행 계산 (1분봉 & 5분봉 전체 기간에 대해 한 번만 수행)
-        df_1m = self.strategy._calculate_indicators(df_1m)
-        df_5m_full = self.strategy._calculate_indicators(df_5m_full)
+        if df_1m_pre is not None and df_5m_pre is not None:
+            # [고속 모드] 사전 계산된 지표 직접 사용 (재계산 생략)
+            df_1m = df_1m_pre
+            df_5m_full = df_5m_pre
+        else:
+            # 1. 5분봉 사전 리샘플링 (루프 밖으로 이동)
+            df_5m_full = df_1m.resample('5T').agg({
+                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+            }).dropna()
+            
+            # 지표 선행 계산 (1분봉 & 5분봉 전체 기간에 대해 한 번만 수행)
+            df_1m = self.strategy._calculate_indicators(df_1m)
+            df_5m_full = self.strategy._calculate_indicators(df_5m_full)
 
         # [v3.8] 본절가 보호 및 트레일링 스탑 상태 추적
         reached_breakeven = False
@@ -126,9 +138,9 @@ class BacktestEngine:
                     trailing_activated = False
                     continue
                 
-                # [v6.2 Friction Conqueror] 스마트 익절: 수수료(0.9%)를 감안하여 최소 1.2% 이상 시에만 허용
+                # [v12.0] 스마트 익절: 최소 수익률 기준을 env로 제어 (SMART_EXIT_MIN_PROFIT)
                 bb_upper = df_1m['BB_Upper'].iloc[i]
-                if current_price >= bb_upper and profit_rate > 0.012: # 수수료 0.9% + 순익 0.3% 보장 시
+                if current_price >= bb_upper and profit_rate > self.smart_exit_min_profit:
                     next_open = df_1m['open'].iloc[i+1]
                     self.logger.info(f"[{code}] [SELL] [SMART] BB 상단 터치 익절 ({signal}): {profit_rate*100:.2f}%")
                     self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
@@ -173,28 +185,17 @@ class BacktestEngine:
                         trailing_activated = False
                         continue
 
-                # [v9.3 Patience] 데드존(Deadzone) 유연화
-                # 진입 후 5분이 지났는데도 수익권(+1.0% 이상)에 진입하지 못할 때만 퇴출
-                if 5 <= hold_duration < self.exit_minutes:
-                    if profit_rate < 0.010: 
+                # [v12.0] 데드존 파라미터화: VCP 전략 도입으로 기본값 99분(비활성화) 권장
+                if self.deadzone_minutes <= hold_duration < 999: # 상한선 해제
+                    if profit_rate < self.deadzone_min_profit: 
                         next_open = df_1m['open'].iloc[i+1]
-                        self.logger.info(f"[{code}] [SELL] [DEADZONE] 5분 내 수익권 미진출로 탈출 ({signal}, 수익률: {profit_rate*100:.2f}%)")
+                        self.logger.info(f"[{code}] [SELL] [DEADZONE] {self.deadzone_minutes:.0f}분 내 수익권 미진출로 탈출 ({signal}, 수익률: {profit_rate*100:.2f}%)")
                         self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
                         reached_breakeven = False
                         trailing_activated = False
                         continue
 
-                # [v4.7] E. 타임컷(Time-Cut) 청산 판별
-                # 진입 시점(buy_time)으로부터 설정한 시간이 지났는지 체크
-                if hold_duration >= self.exit_minutes:
-                    next_open = df_1m['open'].iloc[i+1]
-                    self.logger.info(f"[{code}] [SELL] [TIME-CUT] 보유 시간 초과 ({int(hold_duration)}분) 강제 청산 ({signal}, 수익률: {profit_rate*100:.2f}%)")
-                    self.broker.sell(code, next_open, pos['qty'], df_1m.index[i+1])
-                    reached_breakeven = False
-                    trailing_activated = False
-                    continue
-
-                # G. 기존 손절 청산 로직은 최상단(0순위 방어)으로 위치를 이동하여 Look-ahead 오류 원천차단함 
+                # G. 보유 시간 제약을 해제하고 오직 트레일링/손절/익절 선에서만 청산함
             else:
                 reached_breakeven = False
                 trailing_activated = False

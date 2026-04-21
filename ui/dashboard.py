@@ -24,6 +24,7 @@ class Dashboard(QMainWindow):
         self.execution_manager = execution_manager
         self.strategy = strategy
         self.code_names = {} 
+        self._delisted_cache = {}  # {code: bool} 상장폐지 종목 캐시 (API 호출 최소화)
         
         # [Hot-Reload] .env 파일 경로 및 초기 수정 시간 캐싱
         self.env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
@@ -263,10 +264,25 @@ class Dashboard(QMainWindow):
         self.btn_daemon.setStyleSheet("QPushButton { background-color: #1E8E3E; color: white; border-radius: 6px; font-weight: bold; font-size: 13px; } QPushButton:hover { background-color: #188038; }")
         self.btn_daemon.setCursor(Qt.PointingHandCursor)
         self.btn_daemon.clicked.connect(self.start_daemon_worker)
+
+        # [AUTO TUNE TOGGLE] #
+        self.btn_auto_tune = QPushButton("🤖 AUTO 모드: ON (데몬 자동 세팅)")
+        self.btn_auto_tune.setFixedHeight(35)
+        self.btn_auto_tune.setCheckable(True)
+        self.btn_auto_tune.setCursor(Qt.PointingHandCursor)
+        is_auto = os.getenv("AUTO_OPTIMIZE_MODE", "True").lower() == 'true'
+        self.btn_auto_tune.setChecked(is_auto)
+        self._update_auto_tune_btn_style(is_auto)
+        self.btn_auto_tune.toggled.connect(self.toggle_auto_tune)
+        
+        # [수정] 두 버튼을 HBox 로 묶어서 같은 줄에 절반씩 배치
+        daemon_btns_layout = QHBoxLayout()
+        daemon_btns_layout.addWidget(self.btn_daemon)
+        daemon_btns_layout.addWidget(self.btn_auto_tune)
         
         daemon_vbox.addWidget(daemon_title)
         daemon_vbox.addWidget(self.lbl_daemon_status)
-        daemon_vbox.addWidget(self.btn_daemon)
+        daemon_vbox.addLayout(daemon_btns_layout)
         
         side_panel.addWidget(daemon_card, stretch=6)
 
@@ -421,21 +437,21 @@ class Dashboard(QMainWindow):
         env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
         dotenv.set_key(env_file, "TRADE_TARGET_PROFIT", str(round(value / 100.0, 3)))
         if hasattr(self.execution_manager.logger, 'info'):
-            self.execution_manager.logger.info(f"✅ 환경 설정 갱신: 목표 익절가가 {value}%로 영구 저장되었습니다.")
+            self.execution_manager.logger.info(f"✅ 환경 설정 갱신: 목표 익절가가 {value:.2f}%로 영구 저장되었습니다.")
 
     def on_trail_changed(self, value):
         self.execution_manager.TRAILING_STOP_ACTIVATION = value / 100.0
         env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
         dotenv.set_key(env_file, "TRAILING_STOP_ACTIVATION", str(round(value / 100.0, 3)))
         if hasattr(self.execution_manager.logger, 'info'):
-            self.execution_manager.logger.info(f"✅ 환경 설정 갱신: 트레일링 스탑 발동선이 {value}%로 영구 저장되었습니다.")
+            self.execution_manager.logger.info(f"✅ 환경 설정 갱신: 트레일링 스탑 발동선이 {value:.2f}%로 영구 저장되었습니다.")
 
     def on_stop_changed(self, value):
         self.execution_manager.STOP_LOSS = value / 100.0
         env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
         dotenv.set_key(env_file, "TRADE_STOP_LOSS", str(round(value / 100.0, 3)))
         if hasattr(self.execution_manager.logger, 'info'):
-            self.execution_manager.logger.info(f"✅ 환경 설정 갱신: 손절 커트라인이 {value}%로 영구 저장되었습니다.")
+            self.execution_manager.logger.info(f"✅ 환경 설정 갱신: 손절 커트라인이 {value:.2f}%로 영구 저장되었습니다.")
 
     def on_ai_changed(self, value):
         os.environ["AI_THRESHOLD"] = str(round(value, 2))
@@ -492,6 +508,24 @@ class Dashboard(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "실행 오류", f"데몬 워커 실행에 실패했습니다:\n{e}")
 
+    def _update_auto_tune_btn_style(self, checked):
+        if checked:
+            self.btn_auto_tune.setText("🤖 AUTO 세팅: ON")
+            self.btn_auto_tune.setStyleSheet("QPushButton { background-color: #1a73e8; color: white; border-radius: 6px; font-weight: bold; font-size: 13px; } QPushButton:hover { background-color: #1557b0; }")
+        else:
+            self.btn_auto_tune.setText("🛠️ MANUAL: OFF")
+            self.btn_auto_tune.setStyleSheet("QPushButton { background-color: #5f6368; color: white; border-radius: 6px; font-weight: bold; font-size: 13px; } QPushButton:hover { background-color: #3c4043; }")
+
+    def toggle_auto_tune(self, checked):
+        self._update_auto_tune_btn_style(checked)
+        import dotenv
+        dotenv.set_key(self.env_file, "AUTO_OPTIMIZE_MODE", str(checked))
+        
+        # 로그에 출력
+        print(f"[{'AUTO' if checked else 'MANUAL'} 모드 작동] 야간 파라미터 자동 적용 기능이 {'활성화' if checked else '비활성화'}되었습니다.")
+        if hasattr(self.execution_manager, 'slack'):
+            self.execution_manager.slack.send_message(f"⚙️ *[시스템 설정]* 야간 데몬 파라미터 자동 최적화 기능이 *{'[ON]' if checked else '[OFF]'}* 되었습니다.")
+
     def hot_reload_env(self):
         import dotenv
         if not hasattr(self, 'env_file') or not os.path.exists(self.env_file): return
@@ -503,6 +537,7 @@ class Dashboard(QMainWindow):
         new_stop = float(os.getenv("TRADE_STOP_LOSS", str(ex.STOP_LOSS)))
         new_trail = float(os.getenv("TRAILING_STOP_ACTIVATION", str(ex.TRAILING_STOP_ACTIVATION)))
         new_ai = float(os.getenv("AI_THRESHOLD", "0.38"))
+        new_hfs = float(os.getenv("HFS_GOLDEN_RATIO", "0.618"))
         
         # UI에서 사용자가 조작하여 변경한 경우 현재 메모리 값과 .env 값이 동일하므로 무시
         changed = False
@@ -510,6 +545,7 @@ class Dashboard(QMainWindow):
         if abs(ex.STOP_LOSS - new_stop) > 0.0001: changed = True
         if abs(ex.TRAILING_STOP_ACTIVATION - new_trail) > 0.0001: changed = True
         if abs(float(self.spin_ai.value()) - new_ai) > 0.0001: changed = True
+        if abs(self.strategy.HFS_GOLDEN_RATIO - new_hfs) > 0.0001: changed = True
 
         if not changed:
             return
@@ -517,6 +553,7 @@ class Dashboard(QMainWindow):
         ex.TARGET_PROFIT = new_target
         ex.STOP_LOSS = new_stop
         ex.TRAILING_STOP_ACTIVATION = new_trail
+        self.strategy.HFS_GOLDEN_RATIO = new_hfs
         
         # UI 스핀박스 업데이트 (signal 무한루프 방지)
         self.spin_target.blockSignals(True)
@@ -576,6 +613,9 @@ class Dashboard(QMainWindow):
             total_unrealized_pnl = 0
             total_unrealized_cost = 0
             for code, pos in ex.positions.items():
+                # [상장폐지 필터] 상장폐지/정리매매 종목은 손익 계산에서 제외
+                if self._is_delisted(code):
+                    continue
                 buy_p = pos.get('buy_price', 0)
                 qty = pos.get('qty', 0)
                 if buy_p > 0 and qty > 0:
@@ -755,22 +795,28 @@ class Dashboard(QMainWindow):
             with self.execution_manager.lock:
                 positions = dict(self.execution_manager.positions)
             
-            # [최적화] 모든 계산에 일관된 '실질 수익률(Net ROI)'을 사용하기 위해 내부 함수 정의
+            # [상장폐지 필터] 상장폐지/정리매매 종목을 보유 종목 테이블에서 숨김
+            positions = {c: p for c, p in positions.items() if not self._is_delisted(c)}
+            
+            # [v11.6] 실시간 파이프라인에서 직접 현재가를 조회하는 함수 (monitored_codes 미포함 보유종목도 처리)
             def get_net_roi(c, p):
-                # [v11.5] 항상 자체계산을 기본으로 하고, API와 교차검증
-                cp = p.get('current_price', p['buy_price'])
-                d_tuple = all_data.get(c) 
-                if d_tuple and d_tuple[0] is not None and not d_tuple[0].empty:
-                    cp = d_tuple[0]['close'].iloc[-1]
+                # 파이프라인에서 직접 실시간 틱 데이터 조회 (가장 신뢰도 높은 현재가)
+                df_1m_direct, _ = self.pipeline.get_data(c)
+                if df_1m_direct is not None and not df_1m_direct.empty:
+                    cp = df_1m_direct['close'].iloc[-1]
+                else:
+                    # 파이프라인 미등록 시 스냅샷 현재가 사용 (최후 수단)
+                    cp = p.get('current_price', p['buy_price'])
                 
                 friction_pct = self.execution_manager.TRADING_FRICTION * 100.0
                 simple_rate = ((cp - p['buy_price']) / p['buy_price'] * 100.0) - friction_pct
                 
+                # [v11.6 핵심 수정] api_profit_rate와 실시간 계산 중 더 나쁜(보수적) 값을 표시
+                # → 대시보드 수익률이 손절 엔진과 동일한 기준으로 표시됨
                 if 'api_profit_rate' in p and p['api_profit_rate'] is not None:
                     api_rate = p['api_profit_rate']
-                    # API와 자체계산의 괴리가 5%p 이내면 API 사용, 아니면 자체계산
-                    if abs(api_rate - simple_rate) <= 5.0:
-                        return api_rate
+                    if abs(api_rate - simple_rate) <= 10.0:
+                        return min(api_rate, simple_rate)  # 더 나쁜 값 표시 (보수적)
                 
                 return simple_rate
 
@@ -848,3 +894,33 @@ class Dashboard(QMainWindow):
             logging.getLogger("DopamingBot.Dashboard").error(f"❌ 대시보드 업데이트 중 오류 발생: {e}")
         finally:
             self.setUpdatesEnabled(True)
+
+    def _is_delisted(self, code):
+        """상장폐지/정리매매 종목 여부를 캐시된 결과로 빠르게 판별합니다."""
+        if code in self._delisted_cache:
+            return self._delisted_cache[code]
+        try:
+            # 상태값을 호출하여 빈 값이면 아예 키움에서 삭제된 종목(예: 이트론)으로 간주
+            market_state = self.kiwoom.dynamicCall("GetMasterStockState(QString)", code)
+            
+            if not market_state or market_state.strip() == "":
+                self._delisted_cache[code] = True
+                import logging
+                logging.getLogger("DopamingBot.Dashboard").info(f"🗑️ [상장폐지 필터] {code} 완전 삭제종목 (상태값 없음) - 숨김 처리")
+                return True
+                
+            # 2차 검증: 이름은 있으나 정리매매/상장폐지 상태 코드인 경우
+            # '거래정지'는 VI 발동 등 일시 정지일 때도 표시되므로 대시보드에서 아예 숨기면 안됨 (SK증권 증발 방지)
+            bad_keywords = ["상장폐지", "정리매매"]
+            
+            states = market_state.split("|")
+            # 토큰 단위로 정확히 검사하여 오탐 방지
+            is_bad = any(k.strip() in states for k in bad_keywords)
+                
+            self._delisted_cache[code] = is_bad
+            if is_bad:
+                import logging
+                logging.getLogger("DopamingBot.Dashboard").info(f"🗑️ [상장폐지 필터] {code} 종목을 대시보드에서 숨김 처리합니다. (상태: {market_state})")
+            return is_bad
+        except Exception:
+            return False

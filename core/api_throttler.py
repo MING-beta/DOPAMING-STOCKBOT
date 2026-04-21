@@ -17,11 +17,15 @@ class ApiThrottler:
         self.request_queue = queue.PriorityQueue()
         self._counter = itertools.count() # 동일 우선순위 발생 시 선입선출 보장을 위한 타이브레이커
         
-        # 초당 3.3회 제한(300ms)으로 조정하여 100종목 데이터 싱크 속도 최적화
+        # [v11.9] 동적 스로틀링: 환경 변수에서 지연 시간 로드 (기본 300ms)
+        import os
+        self.throttle_interval = int(os.getenv("API_THROTTLE_INTERVAL", "300"))
+        
         self.throttle_timer = QTimer()
         self.throttle_timer.timeout.connect(self._process_request_queue)
-        self.throttle_timer.start(300) 
+        self.throttle_timer.start(self.throttle_interval) 
         
+        self.logger.info(f"[스로틀러 초기화] 요청 간격: {self.throttle_interval}ms")
         self._is_paused = False # 과부하 보호를 위한 정지 플래그
 
     def put(self, req_dict):
@@ -33,7 +37,7 @@ class ApiThrottler:
         
         if req_type == "send_order":
             priority = 0
-        elif req_type in ["opw00001", "opw00018"]:
+        elif req_type in ["opw00001", "opw00018", "send_condition"]:
             priority = 1
         else:
             priority = 2
@@ -105,6 +109,16 @@ class ApiThrottler:
             else:
                 self.logger.error(f"⚠️ [P{priority} 요청실패] opt10074 (에러: {ret})")
                 if ret in [-200, -300]:
+                    self._retry_later(req)
+                    
+        elif req_type == "send_condition":
+            args = req.get("args") # (screen_no, cond_name, cond_index, is_realtime)
+            ret = self.kiwoom_core.dynamicCall("SendCondition(QString, QString, int, int)", list(args))
+            if ret == 1:
+                self.logger.info(f"🎯 [P{priority} 조건검색] {args[1]} 가동 성공")
+            else:
+                self.logger.error(f"❌ [P{priority} 조건실패] {args[1]} 가동 실패 (에러: {ret})")
+                if ret == -200:
                     self._retry_later(req)
 
     def _retry_later(self, req):

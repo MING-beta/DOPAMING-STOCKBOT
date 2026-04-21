@@ -13,13 +13,22 @@ from backtest.virtual_broker import VirtualBroker
 from backtest.engine import BacktestEngine, calculate_total_profit
 from strategy.stefano_strategy import StefanoStrategy
 from core.ai_engine import AIEngine
-from core.data_collector import DataCollector
 from dotenv import set_key, load_dotenv
+
+# [초기화] 환경 변수 로드 (수수료 및 전략 파라미터 동기화용)
+env_path = os.path.join(base_dir, ".env")
+if os.path.exists(env_path):
+    load_dotenv(env_path)
 
 def run_single_backtest_with_params(code, init_balance, friction, profit_target, stop_loss, ai_thresh):
     """워커 독립 프로세스이며 임시 파라미터를 강제 주입하여 백테스트를 수행합니다."""
     logger = logging.getLogger("DopamingBot")
     logger.setLevel(logging.ERROR) 
+
+    # [BUG FIX] Windows 멀티프로세싱 환경에선 자식 프로세스가 .env를 상속받지 못하므로 다시 로드해야 함
+    env_path = os.path.join(base_dir, ".env")
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
 
     # 최적화용 환경변수 강제 주입
     os.environ['TRADE_TARGET_PROFIT'] = str(profit_target)
@@ -38,8 +47,8 @@ def run_single_backtest_with_params(code, init_balance, friction, profit_target,
         strategy = StefanoStrategy()
         
         ai_engine = AIEngine()
-        data_collector = DataCollector()
-        strategy.set_ai_modules(ai_engine, data_collector)
+        # [DB Lock 방지] 백테스트 병렬 연산 중 DB 잠금 방지 및 오염 차단을 위해 데이터 수집기 비활성화
+        strategy.set_ai_modules(ai_engine, None)
         
         engine = BacktestEngine(broker, strategy)
         df = manager.load_code_data(code)
@@ -73,8 +82,8 @@ class NightlyOptimizer:
             for fname in os.listdir(self.data_dir):
                 if fname.endswith("_1m.csv"):
                     codes.append(fname.replace("_1m.csv", ""))
-        # 성능을 위해 대표 30종목만 샘플링
-        return sorted(list(set(codes)))[:30]
+        # run_active_backtest.py 와 동일하게 확보된 모든 종목 데이터를 사용합니다.
+        return sorted(list(set(codes)))
         
     def evaluate_params(self, profit_target, stop_loss, ai_thresh):
         all_results = []
@@ -94,7 +103,7 @@ class NightlyOptimizer:
                     all_results.append(res)
                     
         total_final = sum(r['final_value'] for r in all_results)
-        return total_final
+        return total_final, len(all_results)
 
     def run_optimization(self, trials=5):
         if not self.target_codes:
@@ -114,9 +123,22 @@ class NightlyOptimizer:
             
             print(f"  [{i+1:02d}/{trials}] 테스트 Param (익절: {pt*100:.1f}%, 손절: {sl*100:.1f}%, AI: {ai:.2f}) ...", end="", flush=True)
             
-            final_val = self.evaluate_params(pt, sl, ai)
-            profit_rate = calculate_total_profit(self.total_initial_balance, final_val)
-            print(f" 완료 => 기대 수익률: {profit_rate:+.2f}%")
+            final_val, success_count = self.evaluate_params(pt, sl, ai)
+            
+            if success_count == 0:
+                print(" 실패 (데이터 없음)")
+                continue
+
+            # [BUG FIX] 실제로 백테스트가 성공한 종목의 원금만을 기준으로 수익률을 계산합니다.
+            # (데이터가 없는 종목의 원금까지 손실로 잡히던 왜곡 해결)
+            actual_initial_balance = success_count * self.per_stock_balance
+            total_net_profit = final_val - actual_initial_balance
+            
+            # [ROI 수식 동기화] run_active_backtest.py 와 동일한 실전 체감 단위 적용
+            realistic_monthly_roi = (total_net_profit / 30000000.0) * 100.0
+            profit_rate = realistic_monthly_roi
+            
+            print(f" 완료 ({success_count}종목) => 기대 수익률: {profit_rate:+.2f}%")
             
             if profit_rate > best_profit:
                 best_profit = profit_rate
@@ -135,8 +157,27 @@ class NightlyOptimizer:
         if not os.path.exists(env_path):
             print("⚠️ .env 파일이 존재하지 않아 환경 변수 업데이트를 생략합니다.")
             return
+        
+        load_dotenv(env_path)
+        # [수동 모드 안전장치] AUTO 모드가 OFF일 경우 사용자 설정을 보존합니다.
+        is_auto = os.getenv("AUTO_OPTIMIZE_MODE", "True").lower() == 'true'
+        if not is_auto:
+            print("⚠️ [MANUAL 모드 활성화됨] AUTO_OPTIMIZE_MODE가 OFF이므로 데몬이 찾은 최적값을 .env에 덮어쓰지 않고 보존합니다.")
+            return
+        
+        # 변경 전 값 기록
+        old_tp = os.getenv("TRADE_TARGET_PROFIT", "N/A")
+        old_sl = os.getenv("TRADE_STOP_LOSS", "N/A")
+        old_ai = os.getenv("AI_THRESHOLD", "N/A")
+        
+        print("=" * 60)
+        print(f"📝 [Nightly Optimizer] .env 파라미터 변경 기록")
+        print(f"   시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"   TRADE_TARGET_PROFIT : {old_tp} → {params[0]}")
+        print(f"   TRADE_STOP_LOSS     : {old_sl} → {params[1]}")
+        print(f"   AI_THRESHOLD        : {old_ai} → {params[2]}")
+        print("=" * 60)
             
-        print("✅ [자동화] 탐색된 최적의 결과를 .env 파일에 주입하여 내일 매매에 적용합니다.")
         set_key(env_path, "TRADE_TARGET_PROFIT", str(params[0]))
         set_key(env_path, "TRADE_STOP_LOSS", str(params[1]))
         set_key(env_path, "AI_THRESHOLD", str(params[2]))

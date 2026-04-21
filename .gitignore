@@ -1,6 +1,9 @@
 # Environments
 venv32/
 venv/
+# Environments
+venv32/
+venv/
 #.env
 
 # Cache
@@ -12,15 +15,25 @@ executions.db
 ai_features.db
 logs/
 stderr.log
+.daily_notification_flags.json
+out_state.txt
+test_out.txt
+test_result*.txt
 
 # IDE & Misc
 .vscode/
 .idea/
+.gemini/
 scratch/
 =
 
-# Backtest Logs & Models
+# Backtest Data & Models
+data/historical/
 backtest_*.txt
 *.csv
 *.db
 *.pkl
+*.zip
+
+# Local Backups
+backups/

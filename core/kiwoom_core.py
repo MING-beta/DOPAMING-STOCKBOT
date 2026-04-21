@@ -55,6 +55,9 @@ class KiwoomCore(QAxWidget):
         self.mts_total_eval = 0
         self.official_daily_pnl = 0
         
+        # [v11.6] 조건검색 중복 가동 방지용 상태 관리
+        self._active_conditions = set() # 실시간 감시 중인 조건식 이름 목록
+        
         # Kiwoom OpenAPI+ 제어기 (COM 오브젝트) 생성
         success = self.setControl("KHOPENAPI.KHOpenAPICtrl.1")
         
@@ -224,10 +227,25 @@ class KiwoomCore(QAxWidget):
         if not ret: self.logger.error("GetConditionLoad 실패")
 
     def send_condition(self, screen_no, cond_name, cond_index, is_realtime):
-        """조건식 시스템 가동"""
-        self.logger.info(f"조건검색 실행: {cond_name} (index: {cond_index})")
-        ret = self.dynamicCall("SendCondition(QString, QString, int, int)", screen_no, cond_name, cond_index, is_realtime)
-        if not ret: self.logger.error("SendCondition 실패")
+        """조건식 시스템 가동 (스로틀러 위임 및 중복 체크)"""
+        if cond_name in self._active_conditions:
+            self.logger.debug(f"[중복 차단] {cond_name} 조건식은 이미 가동 중입니다.")
+            return True
+            
+        self.logger.info(f"[스로틀링 큐 적재] 조건검색 가동 요청: {cond_name}")
+        self._active_conditions.add(cond_name)
+        self.throttler.put({
+            "type": "send_condition",
+            "args": (screen_no, cond_name, cond_index, is_realtime)
+        })
+        return True
+
+    def stop_condition(self, screen_no, cond_name, cond_index):
+        """조건식 시스템 중단"""
+        if cond_name in self._active_conditions:
+            self._active_conditions.remove(cond_name)
+            self.dynamicCall("ConditionStop(QString, QString, int)", screen_no, cond_name, cond_index)
+            self.logger.info(f"🛑 조건검색 중단: {cond_name}")
 
     def set_real_reg(self, screen_no, code_list, fid_list, opt_type):
         """실시간(Real) 주식 체결 수신기 등록"""

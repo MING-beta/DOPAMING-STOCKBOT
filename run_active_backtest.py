@@ -13,7 +13,6 @@ from backtest.virtual_broker import VirtualBroker
 from backtest.engine import BacktestEngine, calculate_total_profit
 from strategy.stefano_strategy import StefanoStrategy
 from core.ai_engine import AIEngine
-from core.data_collector import DataCollector
 from dotenv import load_dotenv
 
 def run_single_backtest(code, init_balance, friction):
@@ -41,10 +40,10 @@ def run_single_backtest(code, init_balance, friction):
         )
         strategy = StefanoStrategy()
         
-        # [v10.0 AI Resurrection] AI 판독기(AIEngine) 및 데이터 수집기(DataCollector) 활성화
+        # [v10.0 AI Resurrection] AI 판독기(AIEngine) 활성화
+        # [DB Lock 방지] 백테스트 중에는 실전 데이터를 수집(DataCollector)하지 않도록 None 주입 (Lock 및 DB 오염 방지)
         ai_engine = AIEngine()
-        data_collector = DataCollector()
-        strategy.set_ai_modules(ai_engine, data_collector)
+        strategy.set_ai_modules(ai_engine, None)
         
         engine = BacktestEngine(broker, strategy)
         
@@ -63,7 +62,8 @@ def run_single_backtest(code, init_balance, friction):
 def main():
     load_dotenv()
     
-    data_dir = os.path.join(base_dir, "data", "historical")
+    target_folder = sys.argv[1] if len(sys.argv) > 1 else "historical"
+    data_dir = os.path.join(base_dir, "data", target_folder)
     TARGET_CODES = []
     if os.path.exists(data_dir):
         for fname in os.listdir(data_dir):
@@ -94,6 +94,7 @@ def main():
     all_results = []
     
     # 병렬 실행 (ProcessPoolExecutor 활용)
+    skipped_count = 0
     with ProcessPoolExecutor() as executor:
         futures = {executor.submit(run_single_backtest, code, PER_STOCK_BALANCE, friction): code for code in TARGET_CODES}
         
@@ -104,6 +105,9 @@ def main():
                 print(f" [OK] [{res['code']}] 테스트 완료")
             elif res:
                 print(f" [ERROR] [{res['code']}] 에러: {res['error']}")
+                skipped_count += 1
+            else:
+                skipped_count += 1
 
     # 결과 취합 및 합산
     total_final_value = 0
@@ -123,11 +127,15 @@ def main():
         total_orders += r['order_count']
         max_mdd = max(max_mdd, r['max_drawdown'])
 
+    # 스킵된 종목은 원금 보존 (거래 미발생 = 손익 0)
+    total_final_value += skipped_count * PER_STOCK_BALANCE
+
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
     
     total_net_profit = total_final_value - TOTAL_VIRTUAL_INITIAL
-    realistic_monthly_roi = (total_net_profit / REALISTIC_ACCOUNT) * 100.0
+    traded_capital = PER_STOCK_BALANCE * len(all_results) if all_results else 1
+    realistic_monthly_roi = (total_net_profit / traded_capital) * 100.0 if traded_capital > 0 else 0
     
     pf = total_win / total_loss if total_loss > 0 else 999.0
 

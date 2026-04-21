@@ -286,33 +286,35 @@ class ExecutionManager:
             if buy_time and (time.time() - buy_time) < 5:
                 continue
             
-            # [v11.5] 항상 자체계산을 먼저 수행
+            # [v11.6] 항상 자체계산(실시간 시세 기반)을 먼저 수행
             simple_rate = (((current_price - buy_price) / buy_price) * 100.0) - (self.TRADING_FRICTION * 100.0)
             
-            # [v11.5] API↔자체계산 교차검증
-            if 'api_profit_rate' in pos_data and not is_mock:
-                api_rate = pos_data['api_profit_rate']
-                if api_rate is not None and abs(api_rate - simple_rate) <= 5.0:
-                    profit_rate = api_rate
-                    is_official = True
+            # [v11.7 수익률 판단 로직 고도화]
+            # 1. 손절(Stop Loss) 판단용: API 지연 시에도 조기 대응을 위해 '최악의 값(최소)' 선택
+            # 2. 익절/보호막(Take Profit/Shield) 판단용: API 지연으로 인한 기회 상실 방지를 위해 '실시간(최신)' 선택
+            
+            api_rate = pos_data.get('api_profit_rate')
+            loss_profit_rate = simple_rate  # 기본값은 자체계산
+            target_profit_rate = simple_rate # 익절용은 항상 실시간 시세 우선
+            
+            if api_rate is not None and not is_mock:
+                # 괴리가 10%p 이내일 때만 API 데이터 참고
+                if abs(api_rate - simple_rate) <= 10.0:
+                    loss_profit_rate = min(api_rate, simple_rate)
+                    # 익절/보호막 판단용으로는 실시간 시세(simple_rate)가 더 높다면 실시간을 우선함
+                    target_profit_rate = max(api_rate, simple_rate)
                 else:
-                    # 괴리 5%p 초과 → 자체계산 우선
-                    if api_rate is not None:
-                        self.logger.warning(f"⚠️ [{code}] API 수익률({api_rate:.2f}%) vs 자체계산({simple_rate:.2f}%) 괴리 {abs(api_rate - simple_rate):.1f}%p → 자체계산 사용")
-                    profit_rate = simple_rate
-                    is_official = False
-            else:
-                profit_rate = simple_rate
-                is_official = False
+                    self.logger.warning(f"⚠️ [{code}] API 수익률({api_rate:.2f}%) vs 자체계산({simple_rate:.2f}%) 괴리 과다 -> 자체계산 강제 적용")
+            
+            profit_rate = loss_profit_rate # 기본 루프용 (나중에 개별 조건에서 target_profit_rate 사용 가능)
             
             # [v11.5] ±15% 이상치 절대 차단 (공식/추정 구분 없이)
             if abs(profit_rate) > 15.0:
                 self.logger.error(f"🚫 [{code}] 수익률 이상치 차단: {profit_rate:.2f}% (±15% 초과, 데이터 오류 의심)")
                 continue
             
-            # [v11.5 디버그] 매도 판단 직전 핵심 변수 로깅
-            p_type = "공식" if is_official else "추정"
-            self.logger.debug(f"[{code}] 수익률: buy={buy_price:,} cur={current_price:,} rate={profit_rate:+.2f}% ({p_type})")
+            # [v11.7 디버그] 매도 판단 직전 핵심 변수 로깅
+            self.logger.debug(f"[{code}] 수익률: buy={buy_price:,} cur={current_price:,} (손절용:{loss_profit_rate:+.2f}% / 익절용:{target_profit_rate:+.2f}%)")
             
             # 1. 최고가(High Price) 및 실질 최고 수익률(High Net Profit) 갱신
             if 'high_price' not in pos_data:
@@ -340,16 +342,16 @@ class ExecutionManager:
             if 'reached_breakeven' not in pos_data:
                 pos_data['reached_breakeven'] = False
             
-            # [v5.4] 쉴드 강화: ROI +1.5% 도달 시 확실한 본절(+0.1% 이상) 확보
-            if not pos_data['reached_breakeven'] and profit_rate >= 1.5: 
+            # [v5.4] 쉴드 강화: ROI +1.5% 도달 시 확실한 본절(+0.1% 이상) 확보 (익절용 수익률 사용)
+            if not pos_data['reached_breakeven'] and target_profit_rate >= 1.5: 
                 pos_data['reached_breakeven'] = True
                 self.logger.warning(f"🛡️ [{code}] [SHIELD] 강력한 수익 확보(+1.5%), 본절 보호 상향")
                 self.slack.send_message(f"🛡️ *[SHIELD]* {code} 강력한 수익(1.5%) 확보로 원금 보호 라인을 가동합니다.")
 
-            if not pos_data['reached_breakeven'] and profit_rate >= self.BREAKEVEN_TRIGGER * 100.0:
+            if not pos_data['reached_breakeven'] and target_profit_rate >= self.BREAKEVEN_TRIGGER * 100.0:
                 pos_data['reached_breakeven'] = True
-                self.logger.warning(f"🛡️ [{code}] [SHIELD] 수익률 {profit_rate:.2f}% 도달 -> 본전 보호(+{self.BREAKEVEN_PROTECT*100:.1f}%) 활성화")
-                self.slack.send_message(f"🛡️ *[SHIELD]* {code} 수익률 {profit_rate:.2f}% 도달! 본전 보호 라인을 +{self.BREAKEVEN_PROTECT*100:.1f}%로 설정합니다.")
+                self.logger.warning(f"🛡️ [{code}] [SHIELD] 수익률 {target_profit_rate:.2f}% 도달 -> 본전 보호(+{self.BREAKEVEN_PROTECT*100:.1f}%) 활성화")
+                self.slack.send_message(f"🛡️ *[SHIELD]* {code} 수익률 {target_profit_rate:.2f}% 도달! 본전 보호 라인을 +{self.BREAKEVEN_PROTECT*100:.1f}%로 설정합니다.")
 
             # 4. 매도 전략 판별 (본절보호 -> 손절 -> 트레일링 스톱 -> 익절 순) 
             signal_type = pos_data.get('signal_type', '상향돌파')
@@ -366,29 +368,27 @@ class ExecutionManager:
                 dyn_trailing_callback = self.TRAILING_STOP_CALLBACK * 100.0
                 dyn_target = self.TARGET_PROFIT * 100.0
 
-            # [A] 하드 스톱 또는 본절가 보호 청산
+            # [A] 하드 스톱 또는 본절가 보호 청산 (손절용 수익률 기반)
             current_stop_limit = self.BREAKEVEN_PROTECT * 100.0 if pos_data['reached_breakeven'] else dyn_stop
             
-            if profit_rate <= current_stop_limit:
-                p_type = "공식" if is_official else "추정"
+            if loss_profit_rate <= current_stop_limit:
                 s_type = "본절보호" if pos_data['reached_breakeven'] else "손절"
-                self.logger.warning(f"[{code}] {p_type} {s_type}선({current_stop_limit:.1f}%) 도달 ({profit_rate:.2f}%) -> 청산")
+                self.logger.warning(f"[{code}] {s_type}선({current_stop_limit:.1f}%) 도달 (현재:{loss_profit_rate:.2f}%) -> 청산")
                 self.execute_sell(code, pipeline, sell_type=s_type)
                 
-            # [B] 트레일링 스톱 (실질 고점 수익률 % 도달 후 고점 대비 % 하락 시 매도)
-            elif high_net_profit_rate >= dyn_trailing_activation and profit_rate <= high_net_profit_rate - dyn_trailing_callback:
-                self.logger.info(f"[{code}] 트레일링 스톱 발동 (실질고점 {high_net_profit_rate:.2f}% -> 현재 {profit_rate:.2f}%, 고점대비 하락폭 {dyn_trailing_callback:.1f}%)")
+            # [B] 트레일링 스톱 (익절용 수익률 기반)
+            elif high_net_profit_rate >= dyn_trailing_activation and target_profit_rate <= high_net_profit_rate - dyn_trailing_callback:
+                self.logger.info(f"[{code}] 트레일링 스톱 발동 (실질고점 {high_net_profit_rate:.2f}% -> 현재 {target_profit_rate:.2f}%, 고점대비 하락폭 {dyn_trailing_callback:.1f}%)")
                 self.execute_sell(code, pipeline, sell_type="트레일링스톱")
             
             # [v5.4] [B-2] 스마트 익절 (BB 상단 터치 & 순익권)
-            elif 'BB_Upper' in df_1m.columns and current_price >= df_1m['BB_Upper'].iloc[-1] and profit_rate > 0.3:
-                self.logger.info(f"[{code}] [SMART] BB 상단 터치 스마트 익절 발동 ({profit_rate:.2f}%)")
+            elif 'BB_Upper' in df_1m.columns and current_price >= df_1m['BB_Upper'].iloc[-1] and target_profit_rate > 0.8:
+                self.logger.info(f"[{code}] [SMART] BB 상단 터치 스마트 익절 발동 ({target_profit_rate:.2f}%)")
                 self.execute_sell(code, pipeline, sell_type="스마트익절_BB상단")
  
-            # [C] 고정 익절
-            elif profit_rate >= dyn_target:
-                p_type = "공식" if is_official else "추정"
-                self.logger.info(f"[{code}] {p_type} 실질 익절선({dyn_target:.1f}%) 도달 ({profit_rate:.2f}%) -> 청산")
+            # [C] 고정 익절 (익절용 수익률 기반)
+            elif target_profit_rate >= dyn_target:
+                self.logger.info(f"[{code}] 실질 익절선({dyn_target:.1f}%) 도달 ({target_profit_rate:.2f}%) -> 청산")
                 self.execute_sell(code, pipeline, sell_type="익절")
 
     def monitor_pending_orders(self):
@@ -553,9 +553,14 @@ class ExecutionManager:
         """
         with self.lock:
             if qty <= 0:
-                if code in self.positions:
-                    self.logger.info(f"🚫 [{code}] 잔고 0 확인 -> 포지션 제거")
+                    self.logger.info(f"🚫 [{code}] 잔고 0 확인 -> 포지션 제거 및 미체결 클린업")
                     del self.positions[code]
+                    
+                    # [v11.7] 잔고가 0이면 해당 종목의 모든 미체결 추적 강제 종료 (데드락 방지)
+                    pending_keys = [k for k in self.pending_orders.keys() if code in k]
+                    for k in pending_keys:
+                        self.pending_orders.pop(k, None)
+                    
                     if not self.is_dry_run:
                         self.kiwoom.set_real_remove("1000", code)
             else:

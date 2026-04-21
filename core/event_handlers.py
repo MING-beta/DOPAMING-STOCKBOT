@@ -173,6 +173,15 @@ class EventHandler:
         to_delete = [code for code, exit_time in self.pending_removals.items() if now - exit_time >= grace_period]
         
         for code in to_delete:
+            # [v11.6 구멍 수정] 유예 만료 전 보유 여부 최우선 확인
+            # 보유 중인 종목은 절대 감시에서 제거하지 않음 (매도 체크 누락 방지)
+            active_positions = self.kc.execution_manager.positions if self.kc.execution_manager else {}
+            if code in active_positions:
+                self.logger.warning(f"🛡️ [보유 종목 보호] {code} - 유예 만료됐으나 현재 보유 중이므로 감시를 계속 유지합니다.")
+                # pending_removals에서만 제거 (다음 유예 타이머 리셋)
+                # 보유 중인 한 계속 이 보호 로직이 실행되어 안전하게 유지됨
+                continue
+            
             del self.pending_removals[code]
             if code in self.kc.monitored_codes:
                 del self.kc.monitored_codes[code]
@@ -351,6 +360,8 @@ class EventHandler:
                     if market_state and ("상장폐지" in market_state or "정리매매" in market_state):
                         bad_stock_purchase += (price * qty)
                         bad_stock_eval += eval_amount
+                        self.logger.info(f"🗑️ [상장폐지 감지] {code_str} - 보유 목록에서 제외 (매입:{price*qty:,}원, 평가:{eval_amount:,}원)")
+                        continue  # server_pos에 포함시키지 않아 대시보드에서도 자동 제외
                     
                     try:
                         # [v11.5 ROOT CAUSE FIX] 키움 opw00018 수익률(%)은 실제 퍼센트의 100배 값으로 반환됨
@@ -399,8 +410,9 @@ class EventHandler:
             # [도구 연동용] 서버 포지션 데이터를 코어에 노출
             self.kc.server_positions = server_pos
             
-            # 계좌 연동이 모두 끝났으므로 조건식 로드 킥오프
-            self.kc.get_condition_load()
+            # 계좌 연동이 모두 끝났으므로 조건식 로드 킥오프 (필요 시에만 - 최초 1회는 메인에서 수행)
+            if not self.kc._condition_loaded:
+                self.kc.get_condition_load()
             return
 
         # 2-1. 당일 실현손익 조회 TR 응답 처리 (서버 공식 데이터)
@@ -435,8 +447,9 @@ class EventHandler:
             # COM 객체 통신 부하 및 Qt Stack Buffer Overrun (0xc0000409) 에러 방지
             data_arr = self.kc.dynamicCall("GetCommDataEx(QString, QString)", sTrCode, "주식분봉차트조회")
             
-            # [선제 방어] 차트 데이터 로드 시점에 이미 상한가면 즉시 제외
-            if data_arr:
+            # [선제 방어] 차트 데이터 로드 시점에 이미 상한가면 즉시 제외 (수집 모드 시 우회)
+            allow_ceiling = os.getenv("STRATEGY_ALLOW_CEILING_DATA", "False").lower() == "true"
+            if data_arr and not allow_ceiling:
                 try:
                     cur_price = abs(int(data_arr[0][0].strip() or 0))
                     ref_price = self.kc.data_pipeline.reference_prices.get(code, 0)

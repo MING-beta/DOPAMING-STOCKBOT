@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import logging
 import os
+from datetime import datetime
 
 # AI 모듈 (선택적 의존성 — 주입(Injection) 방식으로 사용)
 try:
@@ -22,8 +23,8 @@ class StefanoStrategy:
     def __init__(self, check_window=60):
         self.logger = logging.getLogger("DopamingBot.StefanoStrategy")
         self.check_window = check_window
-        # [v11.4] HFS Golden Ratio 필터 (추세 강도 임계치)
-        self.HFS_GOLDEN_RATIO = 0.618
+        # [v11.4] HFS Golden Ratio 필터 (추세 강도 임계치 - .env 연동)
+        self.HFS_GOLDEN_RATIO = float(os.getenv("HFS_GOLDEN_RATIO", "0.618"))
 
         # 거시적(5분봉) 다이버전스 상태 캐싱 {code: bool}
         self.macro_states = {}
@@ -80,6 +81,21 @@ class StefanoStrategy:
         # [v5.9] 전략 모드 로드 (MEAN_REVERSION / BREAKOUT)
         self.strategy_mode = os.getenv("STRATEGY_MODE", "MEAN_REVERSION").upper()
         self.logger.info(f"[전략 모드] 현재 {self.strategy_mode} 모드로 작동 중입니다.")
+        
+        # [v12.0] 돌파 진입 조건 파라미터화 (진입 빈도 조절)
+        self.breakout_rsi_min = float(os.getenv("BREAKOUT_RSI_MIN", "55"))
+        self.breakout_rsi_max = float(os.getenv("BREAKOUT_RSI_MAX", "72"))
+        self.breakout_vo_min  = float(os.getenv("BREAKOUT_VO_MIN", "25.0"))
+        self.breakout_require_double_green = os.getenv("BREAKOUT_REQUIRE_DOUBLE_GREEN", "True").lower() == 'true'
+        self.breakout_require_accel = os.getenv("BREAKOUT_REQUIRE_ACCEL", "True").lower() == 'true'
+        self.breakout_5m_rsi_limit = float(os.getenv("BREAKOUT_5M_RSI_LIMIT", "60.0"))
+        
+        # [v12.0] 풀백 진입 조건 파라미터화
+        self.pullback_rsi_cooling = float(os.getenv("PULLBACK_RSI_COOLING", "40.0"))
+        self.pullback_clean_check = os.getenv("PULLBACK_CLEAN_CHECK", "True").lower() == 'true'
+        
+        # [v11.5] HFS 필터
+        self.HFS_GOLDEN_RATIO = float(os.getenv("HFS_GOLDEN_RATIO", "0.618"))
 
     def _find_valleys(self, arr, distance=2):
         valleys = []
@@ -133,10 +149,16 @@ class StefanoStrategy:
         if self.scanner_soft_mode: vol_threshold, range_threshold = 1.01, 0.001
         now_dt = df_1m.index[-1]
         
+        # [v11.7 지연 데이터 필터링] 실시간 분석 시 데이터 백필(Backfill) 중인 과거 데이터의 로그 중복 방지
+        real_now = datetime.now()
+        time_gap_seconds = (real_now - now_dt).total_seconds()
+        
         # [v7.4 Golden Hour] 시장의 화력이 가장 강력한 오전 특정 시간에만 진입 허용
         current_time_str = now_dt.strftime("%H:%M")
         if not (self.buy_start_time <= current_time_str <= self.buy_end_time):
-            self.logger.debug(f"[{code}] [PASS] 매매 가능 시간 아님 ({current_time_str})")
+            # 10분 이상 지연된 데이터는 조용히 패스 (사용자 혼선 방지)
+            if time_gap_seconds < 600:
+                self.logger.debug(f"[{code}] [PASS] 매매 가능 시간 아님 ({current_time_str})")
             return False, ""
             
         seconds_passed = now_dt.second if hasattr(now_dt, 'second') else 30
@@ -210,6 +232,10 @@ class StefanoStrategy:
                 if not (is_breakout or is_pullback): return False, ""
                 
                 if is_breakout:
+                    # [하이브리드] 5분봉 RSI 과열 방지 - env로 제어 (BREAKOUT_5M_RSI_LIMIT)
+                    if rsi_5m > self.breakout_5m_rsi_limit:
+                        self.logger.debug(f"[{code}] [BREAKOUT] 5분봉 과열 차단 (RSI5m:{rsi_5m:.1f} > {self.breakout_5m_rsi_limit}) - 허리/어깨 진입 방지")
+                        return False, ""
                     # 돌파 매매는 강력한 거시 정배열이 필수
                     if not (is_macro_up and is_macro_aligned): return False, ""
                     signal_type = "상향돌파"
@@ -274,7 +300,7 @@ class StefanoStrategy:
         df['BB_Upper'] = df['MA20'] + (df['STD20'] * bb_std)
         df['BB_Lower'] = df['MA20'] - (df['STD20'] * bb_std)
         
-        # [v7.6] BB Width 계산 (변동성 확장 확인용)
+        # BB Width 계산 (변동성 확장 확인용)
         middle = (df['BB_Upper'] + df['BB_Lower']) / 2
         df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / middle.replace(0, np.nan)
         
@@ -295,72 +321,65 @@ class StefanoStrategy:
         return False
 
     def _check_trend_breakout(self, df: pd.DataFrame):
+        """[v13.0] VCP (변동성 축소 후 돌파 전조) 선취매 로직"""
         if len(df) < 20: return False
         last = df.iloc[-1]
-        prev = df.iloc[-2]  # [v7.4] 직전 봉 비교를 위해 추가
+        prev = df.iloc[-2]
         
-        price_break = last['close'] > last['BB_Upper']
-        vol_mean = df['volume'].iloc[-20:-1].mean()
+        # 1. 수축 (Contraction)
+        # 밴드폭이 매우 좁은 상태 (급등 전 에너지 응축 상태 파악)
+        is_contracted = last['BB_Width'] < 0.08
+        
+        # 2. 교차 (EMA20 돌파 시발점)
+        # 직전 봉은 EMA20 아래 혹은 살짝 걸친 상태였으나, 현재 봉이 위로 명확히 뚫었는가
+        is_ema20_cross = last['close'] > last['EMA20'] and prev['close'] <= prev['EMA20'] * 1.001
+        
+        # 3. 신규 매수세 (살짝 증가하는 볼륨)
+        vol_mean = df['volume'].iloc[-10:-1].mean()
         vol_ratio = last['volume'] / vol_mean if vol_mean > 0 else 1.0
+        # слишком 한 고점 추격을 피하기 위해 볼륨이 살짝 증가하기 시작하는 1.2배 이상 관찰
+        is_healthy_vol = vol_ratio > 1.2
         
-        # [v9.4.1 Optimal] 수급 문턱 미세 조정 + 가속도 확인 (하드코딩 해제하고 env 연동)
-        is_accelerating = last['volume'] > prev['volume'] * 1.5
-        is_vol_spike = vol_ratio >= self.vol_spike_threshold and is_accelerating
+        # 4. 방어 로직 (이미 꼭대기이면 매수 금지)
+        # 종가가 BB 상단을 크게 찢고 나갔다면 이미 늦은 것임 (상단 대비 0.5% 초과 이탈 금지)
+        is_not_climax = last['close'] < last['BB_Upper'] * 1.005
         
-        # [v9.5] 완전 정배열 (Super Growth) & 가속도 증가 컨펌
-        is_aligned = last['EMA20'] > last['EMA60'] > last['EMA120']
-        prev_slope = df['EMA20_Slope'].iloc[-2]
-        is_momentum = last['EMA20_Slope'] > 0.001 and last['EMA20_Slope'] > prev_slope
+        # 5. 기본 추세 및 모멘텀
+        is_macro_up = last['EMA20'] > last['EMA60']
+        is_green = last['close'] > last['open']
+        is_rsi_safe = 40.0 < last['RSI'] < 75.0
         
-        # [v9.4.1] 변동성 확장 기준 진입장벽 완화 (1.05x)
-        prev_width = df['BB_Width'].iloc[-2]
-        is_exploding = last['BB_Width'] > prev_width * 1.05
-        
-        # [v9.5] 2연속 양봉 확인 (Strength Confirmation)
-        is_double_green = last['close'] > last['open'] and prev['close'] > prev['open']
-        
-        # [v9.4.1] RSI 분출 구간 확장 (55~82)
-        is_rsi_safe = 55.0 <= last['RSI'] <= 82.0
-        
-        # [v9.4 Crown] 이평선(MA20) 지격도 조건 완화
-        is_supported = last['close'] > last['MA20'] * 1.002
-        
-        if price_break and is_vol_spike and is_aligned and is_rsi_safe and is_momentum and is_exploding and is_supported and is_double_green and last['close'] > last['open'] and last['VO'] > 25.0 and last['EMA120_Slope'] > 0:
-            self.logger.debug(f"[BREAKOUT] v9.5 Victory 서지 감지! (RVOL:{vol_ratio:.1f}, RSI:{last['RSI']:.1f})")
+        if is_contracted and is_ema20_cross and is_healthy_vol and is_not_climax and is_macro_up and is_green and is_rsi_safe:
+            self.logger.debug(f"[BREAKOUT_VCP] VCP 선취매 타점 포착! (BB_Width:{last['BB_Width']:.3f}, Vol:{vol_ratio:.1f}, RSI:{last['RSI']:.1f})")
             return True
         return False
 
     def _check_pullback_entry(self, df: pd.DataFrame):
-        """[v8.3 Precision] 수익성이 검증된 정예 눌림목만 포착"""
+        """[v13.0] Extreme Deep Dip (극단적 공포 낙주 V자 반등) 로직"""
         if len(df) < 10: return False
         last = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # 1. 완벽 정배열 (Super Uptrend)
-        is_aligned = last['EMA20'] > last['EMA60'] > last['EMA120']
-        if not is_aligned: return False
+        # 1. 극단적 하락 (투매 패닉셀 확인)
+        # RSI가 30 이하로 급락하고, 종가가 BB 하단을 강하게(1.5% 이상) 찢고 내려온 구간
+        is_panic_rsi = last['RSI'] < 30.0
+        is_panic_bb = last['close'] < last['BB_Lower'] * 0.985
         
-        # 2. 터치 확인 (최근 3개 봉 이내에 EMA20을 터치했는가)
-        touched = any(df['low'].iloc[-3:] <= df['EMA20'].iloc[-3:] * 1.002)
+        # 2. 반등 캔들 (Hammer or Green)
+        # 음봉 추세에서 처음 등장하는 꼬리(누군가 밑에서 강하게 삼) 혹은 양봉
+        body = abs(last['open'] - last['close'])
+        lower_wick = min(last['open'], last['close']) - last['low']
+        is_hammer = lower_wick > (body * 1.2) if body > 0 else lower_wick > 0
+        is_green = last['close'] > last['open']
+        is_reversal_candle = is_green or is_hammer
         
-        # 3. 과열 해소 확인 (RSI 바닥 컨펌) - [v8.3]
-        # 직전 봉들 중 RSI가 45 미만으로 충분히 식었어야 함
-        is_cooled_down = df['RSI'].iloc[-5:-1].min() < 45.0
+        # 3. 투매 거래량 유입 (손바뀜)
+        # 하락을 누군가 대량으로 받아내야 반등이 나옴
+        vol_mean = df['volume'].iloc[-10:-1].mean()
+        is_dump_vol = last['volume'] > vol_mean * 2.0
         
-        # 4. 바운스 확인 (양봉 몸통 0.3% + 거래량 가속 + RSI 회복) - [v8.3]
-        body_pct = (last['close'] / last['open']) - 1
-        is_strong_rebound = body_pct >= 0.003
-        
-        vol_mean_5m = df['volume'].iloc[-6:-1].mean()
-        is_vol_surge = last['volume'] > vol_mean_5m * 1.2
-        
-        is_rebound_confirm = is_strong_rebound and is_vol_surge and last['RSI'] > 50
-        
-        # 5. 이평선과의 거리
-        dist_to_ema20 = (last['close'] / last['EMA20']) - 1
-        is_close_enough = 0 < dist_to_ema20 <= self.pullback_gap
-        
-        if touched and is_cooled_down and is_rebound_confirm and is_close_enough:
-            self.logger.debug(f"[PULLBACK] Precision Dynamo! (Body:{body_pct*100:.2f}%, RSI:{last['RSI']:.1f})")
+        if is_panic_rsi and is_panic_bb and is_reversal_candle and is_dump_vol:
+            self.logger.debug(f"[DEEP_DIP] 극한 공포 낙주 포착! (RSI:{last['RSI']:.1f}, BB하단 찢음, 하방꼬리/양봉 확인)")
             return True
         return False
+
